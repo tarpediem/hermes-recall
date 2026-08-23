@@ -58,6 +58,7 @@ writes) merged over these defaults:
 | `limit` | `5` | memories injected per turn |
 | `rerank` | `True` | cross-encoder rerank on the ML API GPU (background warm-up only; the first turn of a session always searches unreranked) |
 | `graph_boost` | `False` | graph entity boost (adds a Neo4j round-trip) |
+| `writes_enabled` | `True` | **master switch.** `false` makes the plugin read-only: no turn, no synthesis, no pre-compress archive, no delegation, no built-in mirror, and `recall_store` returns an error |
 | `sync_turns` | `True` | write completed turns |
 | `session_summary` | `True` | write an end-of-session synthesis |
 | `max_chars` | `4000` | truncation cap on any stored content |

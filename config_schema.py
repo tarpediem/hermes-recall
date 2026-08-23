@@ -57,6 +57,14 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             group="Retrieval",
         ),
         ProviderField(
+            key="writes_enabled",
+            label="Write to Recall",
+            kind=KIND_BOOL,
+            default="true",
+            description="Master switch. Off = read-only: nothing is ever stored.",
+            group="Writes",
+        ),
+        ProviderField(
             key="sync_turns",
             label="Write completed turns",
             kind=KIND_BOOL,

@@ -6,6 +6,7 @@ value rather than letting an exception reach the agent loop.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -75,11 +76,124 @@ DEFAULTS: dict[str, Any] = {
     "limit": 5,
     "rerank": True,
     "graph_boost": False,
+    "writes_enabled": True,
     "sync_turns": True,
     "session_summary": True,
     "max_chars": 4000,
     "min_chars": 40,
 }
+
+# The same surface as ``config_schema.py``, in the shape ``hermes memory
+# setup`` and ``web_server.py::_normalize_memory_provider_schema`` consume
+# (they read ``key``/``description``/``default``/``type``/``secret``/
+# ``required``/``env_var``). ``config_schema.py`` stays authoritative for how
+# the dashboard *renders* the panel — labels, groups, placeholders — but the
+# KEYS must match, which ``tests/test_provider_config.py`` enforces: a key
+# declared in only one of the two is invisible on the other surface.
+#
+# Only the API key is required, so the wizard can be pressed straight through.
+CONFIG_FIELDS: list[dict[str, Any]] = [
+    {
+        "key": "api_key",
+        "description": "Recall API key",
+        "secret": True,
+        "required": True,
+        "env_var": "RECALL_API_KEY",
+        "url": "https://recall.carnival-devops.com",
+    },
+    {
+        "key": "base_url",
+        "description": "API root — point this at a LAN or Tailscale endpoint for preprod.",
+        "type": "text",
+        "default": DEFAULTS["base_url"],
+        "required": False,
+    },
+    {
+        "key": "limit",
+        "description": "How many memories are injected before each turn.",
+        "type": "integer",
+        "default": DEFAULTS["limit"],
+        "required": False,
+    },
+    {
+        "key": "rerank",
+        "description": "Cross-encoder rerank: better ranking, paid off the turn path.",
+        "type": "boolean",
+        "default": DEFAULTS["rerank"],
+        "required": False,
+    },
+    {
+        "key": "graph_boost",
+        "description": "Graph entity boost: adds a Neo4j round-trip. Off by default.",
+        "type": "boolean",
+        "default": DEFAULTS["graph_boost"],
+        "required": False,
+    },
+    {
+        "key": "writes_enabled",
+        "description": "Master switch: turn this off and Recall is read-only.",
+        "type": "boolean",
+        "default": DEFAULTS["writes_enabled"],
+        "required": False,
+    },
+    {
+        "key": "sync_turns",
+        "description": "Store each substantive user/assistant turn.",
+        "type": "boolean",
+        "default": DEFAULTS["sync_turns"],
+        "required": False,
+    },
+    {
+        "key": "session_summary",
+        "description": "Store one synthesis at session end (and before compression).",
+        "type": "boolean",
+        "default": DEFAULTS["session_summary"],
+        "required": False,
+    },
+    {
+        "key": "max_chars",
+        "description": "Everything stored is truncated to this length.",
+        "type": "integer",
+        "default": DEFAULTS["max_chars"],
+        "required": False,
+    },
+    {
+        "key": "min_chars",
+        "description": "Turns shorter than this are not worth an embedding pass.",
+        "type": "integer",
+        "default": DEFAULTS["min_chars"],
+        "required": False,
+    },
+]
+
+
+def _coerce_config_value(key: str, value: Any) -> Any:
+    """Coerce a stored value to the type of its default.
+
+    ``hermes memory setup`` prompts return **strings** for every non-secret
+    field (``memory_setup.py::_prompt``), and ``bool("false")`` is ``True`` —
+    so a wizard-saved ``"false"`` would silently mean *on*. Anything that
+    cannot be coerced falls back to the default rather than poisoning a
+    comparison later.
+    """
+    default = DEFAULTS[key]
+    if isinstance(default, bool):
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+    if isinstance(default, int):
+        if isinstance(value, bool):
+            return default
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+    return value
 
 
 def _format_memories(items: list[dict[str, Any]]) -> tuple[str, int]:
@@ -173,7 +287,7 @@ def load_recall_config(hermes_home: str) -> dict[str, Any]:
             if isinstance(raw, dict):
                 for key, value in raw.items():
                     if key in DEFAULTS:
-                        config[key] = value
+                        config[key] = _coerce_config_value(key, value)
     except Exception as exc:
         logger.warning("Recall config unreadable (%s) — using defaults", type(exc).__name__)
 
@@ -357,16 +471,13 @@ class RecallMemoryProvider(MemoryProvider):
     # -- config ------------------------------------------------------------
 
     def get_config_schema(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "key": "api_key",
-                "description": "Recall API key",
-                "secret": True,
-                "required": True,
-                "env_var": "RECALL_API_KEY",
-                "url": "https://recall.carnival-devops.com",
-            }
-        ]
+        """The full config surface, as deep copies of ``CONFIG_FIELDS``.
+
+        Copies because Hermes hands these dicts straight to the dashboard and
+        to ``hermes memory setup``; a caller that annotates a field in place
+        would otherwise mutate the module constant for the whole process.
+        """
+        return copy.deepcopy(CONFIG_FIELDS)
 
     def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
         """Merge ``values`` into the config file — never truncate it.

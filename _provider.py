@@ -544,7 +544,10 @@ class RecallMemoryProvider(MemoryProvider):
             if self._auth_warned:
                 return
             self._auth_warned = True
-            logger.warning("Recall API key rejected during %s — update RECALL_API_KEY", operation)
+            # ERROR, not WARNING: a rejected key means memory is silently off
+            # for the whole session, and this line is what the README tells a
+            # non-technical user to grep for. Still once per session.
+            logger.error("Recall API key rejected during %s — update RECALL_API_KEY", operation)
             return
         logger.warning("Recall %s failed: %s", operation, exc)
 

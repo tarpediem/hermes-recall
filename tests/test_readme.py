@@ -113,3 +113,24 @@ def test_readme_names_the_master_write_switch_and_what_each_key_controls():
     # The old, false claim: that the four throttles can turn writes off.
     assert "before turning writes off entirely" not in text
     assert "only `writes_enabled` turns" in text
+
+
+def test_readme_tells_a_non_technical_user_how_to_check_it_works():
+    text = README.read_text()
+
+    assert "## Check it's working" in text
+    # The two things they will actually see, and the one string to grep for.
+    assert "Relevant memories (Recall):" in text
+    assert "🧠" in text
+    assert "Recall API key rejected" in text
+    assert "restart" in text.lower()
+
+
+def test_readme_has_a_troubleshooting_table():
+    text = README.read_text()
+
+    assert "## Troubleshooting" in text
+    section = text.split("## Troubleshooting", 1)[1]
+    assert "| symptom |" in section.lower()
+    for case in ("wrong", "unreachable", "slow"):
+        assert case in section.lower(), case

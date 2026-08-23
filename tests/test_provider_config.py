@@ -142,14 +142,18 @@ def test_save_config_writes_only_non_secret_values(provider, tmp_path):
     assert written == {"limit": 3, "sync_turns": False}
 
 
-def test_auth_failure_is_logged_once_per_session(provider, tmp_path, caplog):
+def test_auth_failure_is_logged_once_per_session_at_error_level(provider, tmp_path, caplog):
+    """A rejected key means memory is silently off for the whole session —
+    the one failure a user must be able to find by grepping the agent log."""
     provider.initialize("s", hermes_home=str(tmp_path))
 
     with caplog.at_level("WARNING"):
         provider._log_failure("search", RecallAuthError("rejected"))
         provider._log_failure("store", RecallAuthError("rejected"))
 
-    assert sum("API key rejected" in r.message for r in caplog.records) == 1
+    rejected = [r for r in caplog.records if "API key rejected" in r.message]
+    assert len(rejected) == 1
+    assert rejected[0].levelname == "ERROR"
 
 
 def test_other_failures_are_logged_every_time(provider, tmp_path, caplog):

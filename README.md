@@ -76,6 +76,40 @@ Example `$HERMES_HOME/recall/config.json`:
 }
 ```
 
+## Check it's working
+
+You do not need a terminal for this.
+
+1. Tell the agent something worth remembering ("I always want commit messages
+   in English"), then let the session end.
+2. Start a **new** session and ask about it — "what did I say about commit
+   messages?"
+3. On a turn where memories were found you will see the **🧠** indicator, and
+   the agent answers from what you told it earlier. Memories reach the model
+   in a block that starts with `Relevant memories (Recall):`.
+
+**Restart the agent (or the gateway) after saving the key.** It is read from
+the environment at start-up, so a key saved into a running agent is not picked
+up until it restarts.
+
+If the 🧠 never appears at all, look in the agent log for:
+
+```
+Recall API key rejected
+```
+
+That one line means the key is wrong or expired — everything else keeps
+working, you just get no memory.
+
+## Troubleshooting
+
+| symptom | likely cause | fix |
+|---|---|---|
+| 🧠 never appears; `Recall API key rejected` in the log | wrong, expired or revoked API key | create a new key (Recall → **Settings** → **API keys**), save it in the dashboard panel, **restart the agent** |
+| 🧠 never appears; no `rejected` line, but `Recall search failed` in the log | Recall is unreachable (instance down, wrong `base_url`, no network) | the agent keeps working without memory; **writes made while it is unreachable are lost, not queued**. Check `base_url` and that the instance answers |
+| Nothing on the first turn of a session, memories from the second turn on | Recall answered slower than the turn budget | expected — the first turn searches synchronously, later turns are served from a background warm-up. Persistent? lower `limit`, or turn `rerank` off |
+| Memories appear but nothing new is ever stored | `writes_enabled` is off, or the agent is running in a non-primary context (`subagent`, `cron`, `flush`) | set `writes_enabled: true`; non-primary contexts are read-only by design |
+
 ## What you get
 
 **Before each turn** — a short block, one line per memory:

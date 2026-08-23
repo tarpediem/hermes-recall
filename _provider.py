@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "recall.json"
 SNIPPET_CHARS = 300
+# Hard cap on concurrently live background threads. Reached only when Recall
+# is wedged (each write can hang for WRITE_TIMEOUT); beyond it, writes are
+# dropped with a warning rather than queued or awaited.
+MAX_LIVE_THREADS = 16
+SHUTDOWN_BUDGET_SECONDS = 5.0
 PROVIDER_LABEL = "Recall"
 GLYPH = "🧠"
 
@@ -119,7 +124,12 @@ class RecallMemoryProvider(MemoryProvider):
         # kept only so nothing that touches the attribute breaks.
         self._prefetch_counts: dict[str, int] = {}
         self._last_count: int = 0
-        self._threads: dict[str, threading.Thread] = {}
+        # Live background threads, newest last. A list — not a dict keyed by
+        # name — because a per-name registry forced _spawn to join the previous
+        # thread of the same name, which put a join (up to WRITE_TIMEOUT) on the
+        # turn path. Joins now happen only at a session boundary or shutdown.
+        self._threads: list[threading.Thread] = []
+        self._threads_lock = threading.Lock()
 
     # -- identity / availability ------------------------------------------
 
@@ -162,6 +172,11 @@ class RecallMemoryProvider(MemoryProvider):
             self._prefetch_cache.clear()
             self._prefetch_counts.clear()
             self._last_count = 0
+            # Forget finished threads; deliberately do NOT join live ones. A
+            # store from the previous session is a daemon thread writing a
+            # valid memory — it is left to finish on its own, and re-init stays
+            # fast even mid-flight.
+            self._prune_threads()
 
             self._config = load_recall_config(self._hermes_home)
             self._client.base_url = str(self._config["base_url"]).rstrip("/")
@@ -221,13 +236,53 @@ class RecallMemoryProvider(MemoryProvider):
 
     # -- threading ---------------------------------------------------------
 
+    def _prune_threads(self) -> None:
+        """Forget finished threads. Never joins — safe on the turn path."""
+        with self._threads_lock:
+            self._threads = [t for t in self._threads if t.is_alive()]
+
+    def _join_threads(self, budget: float) -> None:
+        """Join live threads within a total ``budget`` in seconds, then prune.
+
+        Only ever called at a boundary (``shutdown``, ``on_session_switch``
+        with ``reset=True``) — never from ``prefetch``/``sync_turn``/mirrors.
+        """
+        deadline = time.monotonic() + budget
+        for thread in list(self._threads):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if thread.is_alive():
+                thread.join(timeout=remaining)
+        self._prune_threads()
+
     def _spawn(self, name: str, target) -> None:
-        """Start a daemon thread, joining the previous one of the same name."""
-        previous = self._threads.get(name)
-        if previous is not None and previous.is_alive():
-            previous.join(timeout=5.0)
-        thread = threading.Thread(target=target, daemon=True, name=f"recall-{name}")
-        self._threads[name] = thread
+        """Start a daemon thread. O(1): it never joins, so callers never block.
+
+        The target runs wholly inside a failure handler, so no background
+        exception — from any target — can reach ``threading.excepthook`` and
+        print a traceback into the agent's terminal.
+        """
+
+        def _run() -> None:
+            try:
+                target()
+            except Exception as exc:  # noqa: BLE001 - the point is to catch everything
+                self._log_failure("background", exc)
+
+        thread = threading.Thread(target=_run, daemon=True, name=f"recall-{name}")
+        with self._threads_lock:
+            self._threads = [t for t in self._threads if t.is_alive()]
+            if len(self._threads) >= MAX_LIVE_THREADS:
+                # A wedged Recall must not grow the pool without bound. Drop the
+                # work rather than block: memory is best-effort by design.
+                logger.warning(
+                    "Recall %s dropped: %d background writes already in flight",
+                    name,
+                    len(self._threads),
+                )
+                return
+            self._threads.append(thread)
         thread.start()
 
     # -- recall ------------------------------------------------------------
@@ -417,10 +472,7 @@ class RecallMemoryProvider(MemoryProvider):
 
     def shutdown(self) -> None:
         """Join every live background thread within a 5 s total budget."""
-        deadline = time.monotonic() + 5.0
-        for thread in list(self._threads.values()):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            if thread.is_alive():
-                thread.join(timeout=remaining)
+        try:
+            self._join_threads(SHUTDOWN_BUDGET_SECONDS)
+        except Exception as exc:
+            self._log_failure("shutdown", exc)

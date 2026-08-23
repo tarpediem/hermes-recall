@@ -56,7 +56,7 @@ writes) merged over these defaults:
 |---|---|---|
 | `base_url` | `https://recall.carnival-devops.com` | API root. `RECALL_BASE_URL` env overrides it. |
 | `limit` | `5` | memories injected per turn |
-| `rerank` | `True` | cross-encoder rerank on the ML API GPU |
+| `rerank` | `True` | cross-encoder rerank on the ML API GPU (background warm-up only; the first turn of a session always searches unreranked) |
 | `graph_boost` | `False` | graph entity boost (adds a Neo4j round-trip) |
 | `sync_turns` | `True` | write completed turns |
 | `session_summary` | `True` | write an end-of-session synthesis |
@@ -86,6 +86,14 @@ Relevant memories (Recall):
 ```
 
 Hermes shows a 🧠 indicator on turns where memories were actually injected.
+
+**The first turn of a session uses an unreranked search** so it fits the 3 s
+turn budget; every turn after it is served from a reranked background warm-up
+started during the previous turn. A reranked query costs ~4.5 s against a real
+instance, which no turn-path budget can absorb — and the first turn of a
+session is exactly where cross-session recall matters most, so it gets a
+slightly worse-ranked block instead of none at all. Same rule whenever the
+warm-up has not landed yet.
 
 **After each turn** — the user/assistant pair is stored as a `context` memory,
 tagged `hermes`, `session:<id>`, `platform:<platform>`, `agent:<profile>` —
@@ -172,10 +180,9 @@ API key is never logged.
   measures ~4.5 s against the public instance (cross-encoder round-trip on the
   ML API GPU) versus ~0.3 s without. The background warm-up and the
   `recall_search` tool are given a 10 s budget and absorb it; the synchronous
-  turn-path fallback keeps a hard 3 s budget and simply injects nothing when it
-  cannot finish. In practice that means the very first turn of a session may
-  get no block while `rerank` is on — set `rerank: false` if you would rather
-  have sub-second injection from turn one than the better ranking.
+  turn-path fallback keeps a hard 3 s budget, which is why it drops rerank
+  rather than inject nothing (see *What you get*). Turning `rerank` off makes
+  every turn behave like the first one: faster, ranked slightly worse.
 - Background writes run on daemon threads, capped at 16 concurrently in
   flight; beyond that a wedged Recall causes writes to be dropped (logged),
   never queued or awaited on the turn path.

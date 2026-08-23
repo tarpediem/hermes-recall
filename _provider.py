@@ -16,7 +16,13 @@ from typing import Any
 
 from agent.memory_provider import MemoryProvider
 
-from ._client import MEMORY_TYPES, SLOW_READ_TIMEOUT, RecallAuthError, RecallClient
+from ._client import (
+    MEMORY_TYPES,
+    READ_TIMEOUT,
+    SLOW_READ_TIMEOUT,
+    RecallAuthError,
+    RecallClient,
+)
 from ._filters import (
     condense_turn,
     extract_insights,
@@ -459,17 +465,20 @@ class RecallMemoryProvider(MemoryProvider):
         session_id: str,
         generation: int | None = None,
         timeout: float | None = None,
+        rerank: bool | None = None,
     ) -> str:
         """Run one search and cache the rendered block. Returns "" on failure.
 
-        ``timeout`` defaults to the client's turn-path budget; the background
-        warm-up passes the longer off-turn budget instead.
+        ``timeout`` defaults to the client's turn-path budget and ``rerank`` to
+        the configured value; the two callers off the turn path and on it
+        override them in opposite directions (see ``prefetch`` /
+        ``queue_prefetch``).
         """
         try:
             items = self._client.search(
                 query,
                 limit=int(self._config.get("limit", 5)),
-                rerank=bool(self._config.get("rerank", True)),
+                rerank=bool(self._config.get("rerank", True)) if rerank is None else bool(rerank),
                 graph_boost=bool(self._config.get("graph_boost", False)),
                 timeout=timeout,
             )
@@ -491,7 +500,15 @@ class RecallMemoryProvider(MemoryProvider):
         return block
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Return the memory block to inject. Never raises, never blocks >3 s."""
+        """Return the memory block to inject. Never raises, never blocks >3 s.
+
+        A cache miss — the first turn of a session, or a warm-up that has not
+        landed yet — is served by a synchronous search that DROPS rerank. A
+        reranked query costs ~4.5 s and could never fit the 3 s turn budget, so
+        the alternative to an unreranked hit here is no memory at all on the
+        one turn where cross-session recall matters most. Every warm turn after
+        it is served from the reranked warm-up.
+        """
         try:
             if is_trivial_prompt(query):
                 self._last_count = 0
@@ -499,7 +516,7 @@ class RecallMemoryProvider(MemoryProvider):
             key = session_id or self._session_id
             entry = self._prefetch_cache.pop(key, None)
             if entry is None:
-                self._search_and_cache(query, key)
+                self._search_and_cache(query, key, timeout=READ_TIMEOUT, rerank=False)
                 # A cold synchronous hit is consumed immediately, not left cached.
                 entry = self._prefetch_cache.pop(key, None)
             block, count = entry if entry else ("", 0)
@@ -513,9 +530,10 @@ class RecallMemoryProvider(MemoryProvider):
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Warm the cache in the background for the next turn.
 
-        Off the turn path, so it gets the longer budget: a reranked search
-        against a real instance takes ~4.5 s, and warming with the 3 s
-        turn-path budget meant the cache was never filled at all.
+        Off the turn path, so it keeps the configured ``rerank`` and gets the
+        longer budget: a reranked search against a real instance takes ~4.5 s,
+        and warming with the 3 s turn-path budget meant the cache was never
+        filled at all.
         """
         try:
             if is_trivial_prompt(query):
@@ -752,8 +770,15 @@ class RecallMemoryProvider(MemoryProvider):
     # -- shutdown ----------------------------------------------------------
 
     def shutdown(self) -> None:
-        """Join every live background thread within a 5 s total budget."""
+        """Join every live background thread within a 5 s total budget.
+
+        Whatever did not finish inside the budget is abandoned, so the cache
+        generation is bumped: a warm-up that outlives the join must discard its
+        result rather than write it back under a key nothing will read again.
+        Same rule as ``initialize`` and a session ``reset``.
+        """
         try:
             self._join_threads(SHUTDOWN_BUDGET_SECONDS)
+            self._cache_generation += 1
         except Exception as exc:
             self._log_failure("shutdown", exc)

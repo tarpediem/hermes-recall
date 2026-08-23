@@ -86,8 +86,9 @@ def test_readme_documents_how_the_live_integration_test_is_enabled():
     assert "RECALL_TEST_BASE_URL" in text
     assert live.PURGE_TAG in text
     assert live.PURGE_TAG == "hermes-recall-live-test"
+    live_source = Path(live.__file__).read_text()
     for var in ("RECALL_TEST_API_KEY", "RECALL_TEST_BASE_URL"):
-        assert var in live.__file__ or var in Path(live.__file__).read_text()
+        assert var in live_source
 
 
 def test_readme_documents_both_read_budgets():

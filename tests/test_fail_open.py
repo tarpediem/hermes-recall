@@ -547,7 +547,8 @@ def test_the_auth_warning_re_arms_after_a_session_reset(tmp_path, monkeypatch, c
 # -- timeouts ----------------------------------------------------------------
 
 
-def test_the_read_path_passes_the_read_timeout(tmp_path, monkeypatch, caplog):
+def test_the_cold_turn_path_sends_no_rerank_and_the_turn_budget(tmp_path, monkeypatch, caplog):
+    """Asserted at the wire, not at the client: this is what prod receives."""
     fake = ExplodingRequests(lambda: requests.exceptions.Timeout("read timed out"))
     monkeypatch.setattr(_client, "requests", fake)
     provider = make_provider(tmp_path)
@@ -559,6 +560,7 @@ def test_the_read_path_passes_the_read_timeout(tmp_path, monkeypatch, caplog):
     for verb, _url, kwargs in fake.calls:
         assert verb == "get"
         assert kwargs["timeout"] == READ_TIMEOUT
+        assert kwargs["params"]["rerank"] == "false"
     assert_no_key(caplog)
 
 
@@ -575,6 +577,8 @@ def test_the_background_warm_up_gets_the_off_turn_timeout(tmp_path, monkeypatch,
     assert fake.calls, "the warm-up never reached the transport"
     for _verb, _url, kwargs in fake.calls:
         assert kwargs["timeout"] == SLOW_READ_TIMEOUT
+        # The configured value survives here — only the cold path overrides it.
+        assert kwargs["params"]["rerank"] == "true"
     assert SLOW_READ_TIMEOUT > READ_TIMEOUT
     assert_no_key(caplog)
 
@@ -588,6 +592,7 @@ def test_the_search_tool_gets_the_off_turn_timeout(tmp_path, monkeypatch, caplog
     provider.shutdown()
 
     assert [kwargs["timeout"] for _v, _u, kwargs in fake.calls] == [SLOW_READ_TIMEOUT]
+    assert [kwargs["params"]["rerank"] for _v, _u, kwargs in fake.calls] == ["true"]
     assert_no_key(caplog)
 
 
@@ -703,3 +708,36 @@ def test_a_wrong_shape_store_response_still_reports_success(payload, tmp_path, m
     assert result["stored"] is True
     assert isinstance(result["memory_id"], str)
     assert_no_key(caplog, raw)
+
+
+def test_the_two_read_paths_differ_only_where_they_must(tmp_path, monkeypatch, caplog):
+    """Cold = unreranked inside the turn budget; warm = configured, off-turn."""
+    fake = StaticRequests(lambda: FakeResponse(200, {"items": []}))
+    monkeypatch.setattr(_client, "requests", fake)
+    provider = make_provider(tmp_path)
+
+    provider.prefetch(QUERY, session_id="s1")
+    provider.queue_prefetch(QUERY, session_id="s1")
+    provider.shutdown()
+
+    cold, warm = fake.calls[0][2], fake.calls[1][2]
+    assert (cold["params"]["rerank"], cold["timeout"]) == ("false", READ_TIMEOUT)
+    assert (warm["params"]["rerank"], warm["timeout"]) == ("true", SLOW_READ_TIMEOUT)
+    # Everything else is identical: only the two knobs move.
+    assert cold["params"]["query"] == warm["params"]["query"]
+    assert cold["params"]["limit"] == warm["params"]["limit"]
+    assert cold["params"]["graph_boost"] == warm["params"]["graph_boost"]
+    assert_no_key(caplog)
+
+
+def test_shutdown_bumps_the_cache_generation(tmp_path, monkeypatch, caplog):
+    """Work abandoned at the 5 s join must not write back after the fact."""
+    fake = StaticRequests(lambda: FakeResponse(200, {"items": []}))
+    monkeypatch.setattr(_client, "requests", fake)
+    provider = make_provider(tmp_path)
+    generation = provider._cache_generation
+
+    provider.shutdown()
+
+    assert provider._cache_generation != generation
+    assert_no_key(caplog)

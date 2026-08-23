@@ -2,7 +2,7 @@
 
 import threading
 
-from recall._client import RecallClient, RecallError
+from recall._client import READ_TIMEOUT, SLOW_READ_TIMEOUT, RecallClient, RecallError
 from recall._provider import RecallMemoryProvider
 
 
@@ -23,6 +23,7 @@ class RecordingClient(RecallClient):
                 "rerank": rerank,
                 "graph_boost": graph_boost,
                 "tags": tags,
+                "timeout": timeout,
             }
         )
         if self.raiser is not None:
@@ -88,7 +89,12 @@ def test_prefetch_cold_cache_calls_search_and_returns_the_block(tmp_path):
     assert len(client.calls) == 1
 
 
-def test_prefetch_sends_the_configured_search_parameters(tmp_path):
+def test_the_cold_path_searches_unreranked_inside_the_turn_budget(tmp_path):
+    """A cache miss must fit the 3 s turn budget, so it drops rerank.
+
+    A reranked query costs ~4.5 s against a real instance: keeping rerank here
+    would mean no memory at all on the first turn of every session.
+    """
     client = RecordingClient(ITEMS)
     provider = _provider(client, tmp_path)
 
@@ -96,9 +102,36 @@ def test_prefetch_sends_the_configured_search_parameters(tmp_path):
 
     call = client.calls[0]
     assert call["limit"] == 5
-    assert call["rerank"] is True
+    assert call["rerank"] is False
+    assert call["timeout"] == READ_TIMEOUT
     assert call["graph_boost"] is False
     assert call["tags"] is None
+
+
+def test_the_warm_up_keeps_the_configured_rerank_and_the_off_turn_budget(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.queue_prefetch("a real question about the graph indexer", session_id="s1")
+    provider.shutdown()
+
+    call = client.calls[0]
+    assert call["limit"] == 5
+    assert call["rerank"] is True  # the configured value, not the cold-path override
+    assert call["timeout"] == SLOW_READ_TIMEOUT
+
+
+def test_shutdown_makes_an_abandoned_warm_up_discard_its_result(tmp_path):
+    """A warm-up that outlives the 5 s join must not write back afterwards."""
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+    generation = provider._cache_generation
+
+    provider.shutdown()
+    block = provider._search_and_cache("a real question", "s1", generation)
+
+    assert block  # still returned to a synchronous caller
+    assert provider._prefetch_cache == {}  # but never resurrected in the cache
 
 
 def test_prefetch_truncates_each_snippet_to_300_chars(tmp_path):

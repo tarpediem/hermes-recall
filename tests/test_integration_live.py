@@ -34,6 +34,9 @@ PURGE_TAG = "hermes-recall-live-test"
 # retrievable. Bounded so a broken instance fails the test instead of hanging.
 SEARCH_ATTEMPTS = 8
 SEARCH_INTERVAL_SECONDS = 2.0
+# The provider block may arrive from the reranked warm-up or from the cold
+# unreranked fallback; give both a bounded chance rather than one 5 s join.
+BLOCK_POLL_SECONDS = 20.0
 
 pytestmark = pytest.mark.skipif(
     not API_KEY, reason="set RECALL_TEST_API_KEY to run the live integration test"
@@ -136,8 +139,18 @@ def test_the_provider_injects_a_block_containing_the_stored_memory(
 
     try:
         provider.queue_prefetch(stored_memory["query"], session_id="live-test")
-        provider.shutdown()  # drains the warm-up thread into the cache
-        block = provider.prefetch(stored_memory["query"], session_id="live-test")
+
+        # Do NOT bet on one join: a reranked warm-up runs 4.3-4.6 s against a
+        # 5 s shutdown budget. Poll instead, and assert the CONTENT rather than
+        # which path produced it — a warm hit and a cold unreranked hit are both
+        # correct outcomes here, and both must contain the marker.
+        block = ""
+        deadline = time.monotonic() + BLOCK_POLL_SECONDS
+        while True:
+            provider.shutdown()  # drains whatever the warm-up left in flight
+            block = provider.prefetch(stored_memory["query"], session_id="live-test")
+            if block or time.monotonic() >= deadline:
+                break
 
         assert block.startswith("Relevant memories (Recall):")
         assert stored_memory["marker"] in block

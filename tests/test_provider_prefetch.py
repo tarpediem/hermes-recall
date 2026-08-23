@@ -1,5 +1,7 @@
 """Prefetch cache, injected format, and the recall_status contract."""
 
+import threading
+
 from recall._client import RecallClient, RecallError
 from recall._provider import RecallMemoryProvider
 
@@ -26,6 +28,27 @@ class RecordingClient(RecallClient):
         if self.raiser is not None:
             raise self.raiser
         return self.results
+
+
+class GatedClient(RecordingClient):
+    """The FIRST search blocks until the test releases it; later ones run free.
+
+    Lets a test hold a background prefetch mid-flight and drive the foreground
+    path against it deterministically — Events only, never sleeps.
+    """
+
+    def __init__(self, results=None):
+        super().__init__(results)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def search(self, query, **kwargs):
+        first = not self.calls
+        result = super().search(query, **kwargs)
+        if first:
+            self.entered.set()
+            assert self.release.wait(timeout=5.0)
+        return result
 
 
 ITEMS = [
@@ -215,3 +238,54 @@ def test_recall_status_is_none_after_a_failed_prefetch(tmp_path):
     provider.prefetch("another genuine question about something", session_id="s1")
 
     assert provider.recall_status() is None
+
+
+# -- publication atomicity (regression: block and count were two dict writes) --
+
+
+def test_a_warm_cache_entry_is_one_atomic_block_and_count_pair(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.queue_prefetch("a genuine question about something", session_id="s1")
+    provider.shutdown()
+
+    entry = provider._prefetch_cache["s1"]
+    block, count = entry
+    assert block.startswith("Relevant memories (Recall):")
+    assert count == len(ITEMS) == len(block.splitlines()) - 1
+
+
+def test_a_warm_hit_reports_its_count_without_a_second_lookup(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.queue_prefetch("a genuine question about something", session_id="s1")
+    provider.shutdown()
+    # Anything published outside the cache entry is not part of the contract.
+    provider._prefetch_counts.clear()
+
+    block = provider.prefetch("a genuine question about something", session_id="s1")
+
+    assert block.startswith("Relevant memories (Recall):")
+    assert provider.recall_status().count == 2
+
+
+def test_a_foreground_prefetch_during_a_background_search_stays_consistent(tmp_path):
+    client = GatedClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.queue_prefetch("a genuine question about something", session_id="s1")
+    assert client.entered.wait(timeout=5.0)  # the background search is in flight
+
+    block = provider.prefetch("a genuine question about something", session_id="s1")
+    status = provider.recall_status()
+
+    assert block.startswith("Relevant memories (Recall):")
+    assert status is not None and status.count == 2
+
+    client.release.set()
+    provider.shutdown()
+
+    published_block, published_count = provider._prefetch_cache["s1"]
+    assert published_count == len(published_block.splitlines()) - 1 == 2

@@ -111,7 +111,12 @@ class RecallMemoryProvider(MemoryProvider):
         self._agent_context = "primary"
         self._writes_enabled = True
         self._auth_warned = False
-        self._prefetch_cache: dict[str, str] = {}
+        # One atomic entry per session: (block, count). Published as a single
+        # dict assignment so a concurrent prefetch() can never observe a block
+        # without its count (see _search_and_cache).
+        self._prefetch_cache: dict[str, tuple[str, int]] = {}
+        # Declared by the provider skeleton; superseded by the tuple above and
+        # kept only so nothing that touches the attribute breaks.
         self._prefetch_counts: dict[str, int] = {}
         self._last_count: int = 0
         self._threads: dict[str, threading.Thread] = {}
@@ -242,11 +247,10 @@ class RecallMemoryProvider(MemoryProvider):
         block, count = _format_memories(items)
         key = session_id or self._session_id
         if block:
-            self._prefetch_cache[key] = block
-            self._prefetch_counts[key] = count
+            # Single assignment: block and count are published together.
+            self._prefetch_cache[key] = (block, count)
         else:
             self._prefetch_cache.pop(key, None)
-            self._prefetch_counts.pop(key, None)
         return block
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -256,14 +260,13 @@ class RecallMemoryProvider(MemoryProvider):
                 self._last_count = 0
                 return ""
             key = session_id or self._session_id
-            cached = self._prefetch_cache.pop(key, None)
-            if cached:
-                self._last_count = self._prefetch_counts.pop(key, 0)
-                return cached
-            block = self._search_and_cache(query, key)
-            # A cold synchronous hit is consumed immediately, not left cached.
-            self._last_count = self._prefetch_counts.pop(key, 0)
-            self._prefetch_cache.pop(key, None)
+            entry = self._prefetch_cache.pop(key, None)
+            if entry is None:
+                self._search_and_cache(query, key)
+                # A cold synchronous hit is consumed immediately, not left cached.
+                entry = self._prefetch_cache.pop(key, None)
+            block, count = entry if entry else ("", 0)
+            self._last_count = count
             return block
         except Exception as exc:
             self._log_failure("prefetch", exc)

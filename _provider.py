@@ -137,6 +137,12 @@ class RecallMemoryProvider(MemoryProvider):
         # turn path. Joins now happen only at a session boundary or shutdown.
         self._threads: list[threading.Thread] = []
         self._threads_lock = threading.Lock()
+        # Bumped whenever the prefetch cache is flushed wholesale. A background
+        # search carries the generation it was spawned under and drops its
+        # result if the cache has been flushed since — otherwise an in-flight
+        # prefetch writes its entry back after the flush, under a session key
+        # that will never be read or evicted again.
+        self._cache_generation = 0
 
     # -- identity / availability ------------------------------------------
 
@@ -178,6 +184,7 @@ class RecallMemoryProvider(MemoryProvider):
             self._auth_warned = False
             self._prefetch_cache.clear()
             self._prefetch_counts.clear()
+            self._cache_generation += 1
             self._last_count = 0
             # Forget finished threads; deliberately do NOT join live ones. A
             # store from the previous session is a daemon thread writing a
@@ -255,7 +262,11 @@ class RecallMemoryProvider(MemoryProvider):
         with ``reset=True``) — never from ``prefetch``/``sync_turn``/mirrors.
         """
         deadline = time.monotonic() + budget
-        for thread in list(self._threads):
+        with self._threads_lock:
+            snapshot = list(self._threads)
+        # Joined OUTSIDE the lock: holding it here would block _spawn (and so
+        # the turn path) for the whole budget.
+        for thread in snapshot:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -297,7 +308,7 @@ class RecallMemoryProvider(MemoryProvider):
 
     # -- recall ------------------------------------------------------------
 
-    def _search_and_cache(self, query: str, session_id: str) -> str:
+    def _search_and_cache(self, query: str, session_id: str, generation: int | None = None) -> str:
         """Run one search and cache the rendered block. Returns "" on failure."""
         try:
             items = self._client.search(
@@ -310,6 +321,11 @@ class RecallMemoryProvider(MemoryProvider):
             self._log_failure("search", exc)
             return ""
         block, count = _format_memories(items)
+        if generation is not None and generation != self._cache_generation:
+            # The cache was flushed while this search was in flight (re-init or
+            # a session reset). Return the block to a synchronous caller but do
+            # not resurrect an entry under the dead session's key.
+            return block
         key = session_id or self._session_id
         if block:
             # Single assignment: block and count are published together.
@@ -344,7 +360,10 @@ class RecallMemoryProvider(MemoryProvider):
             if is_trivial_prompt(query):
                 return
             key = session_id or self._session_id
-            self._spawn("prefetch", lambda: self._search_and_cache(query, key))
+            generation = self._cache_generation
+            self._spawn(
+                "prefetch", lambda: self._search_and_cache(query, key, generation)
+            )
         except Exception as exc:
             self._log_failure("queue_prefetch", exc)
 
@@ -526,6 +545,7 @@ class RecallMemoryProvider(MemoryProvider):
                 self._join_threads(SHUTDOWN_BUDGET_SECONDS)
                 self._prefetch_cache.clear()
                 self._prefetch_counts.clear()
+                self._cache_generation += 1
                 self._last_count = 0
                 self._auth_warned = False
             if new_session_id:

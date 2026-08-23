@@ -45,6 +45,22 @@ class RecordingClient(RecallClient):
         ]
 
 
+class GatedRecordingClient(RecordingClient):
+    """A store that blocks until the test releases it — no sleeps anywhere."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = threading.Event()
+        self.entered = threading.Semaphore(0)
+
+    def store(self, content, *, memory_type="context", scope="project", tags=None):
+        self.entered.release()
+        self.gate.wait(timeout=10.0)
+        return super().store(
+            content, memory_type=memory_type, scope=scope, tags=tags
+        )
+
+
 def _provider(client, tmp_path, **init):
     provider = RecallMemoryProvider(client)
     provider.initialize(
@@ -143,16 +159,31 @@ def test_on_session_switch_with_reset_rearms_the_auth_warning(tmp_path):
     assert provider._auth_warned is False
 
 
-def test_on_session_switch_with_reset_leaves_no_live_threads(tmp_path):
-    """reset is a session boundary, so joining there is allowed — and expected."""
-    client = RecordingClient()
+def test_on_session_switch_with_reset_joins_the_in_flight_write(tmp_path):
+    """reset is a session boundary, so joining there is allowed — and expected.
+
+    The store is still blocked when the hook is entered (the releaser waits for
+    ``switching``), so the hook can only return with the write landed by having
+    joined it. Deleting the ``_join_threads`` call also leaves the finished
+    thread in ``_threads``: nothing else prunes the registry here.
+    """
+    client = GatedRecordingClient()
     provider = _provider(client, tmp_path)
     provider.on_session_end(MESSAGES)
+    assert client.entered.acquire(timeout=5.0), "the store must have started"
 
+    switching = threading.Event()
+    releaser = threading.Thread(
+        target=lambda: (switching.wait(timeout=5.0), client.gate.set()), daemon=True
+    )
+    releaser.start()
+
+    switching.set()
     provider.on_session_switch("s2", reset=True)
 
     assert provider._threads == []
-    assert len(client.stored) == 1
+    assert len(client.stored) == 1, "reset must not strand the session's write"
+    releaser.join(timeout=5.0)
 
 
 def test_on_session_switch_rewound_invalidates_the_current_cache(tmp_path):
@@ -177,16 +208,24 @@ def test_on_session_switch_without_reset_keeps_other_cached_sessions(tmp_path):
 
 
 def test_on_session_switch_without_reset_does_not_join(tmp_path):
-    """A plain switch is on the hot path of a subagent handoff: stay O(1)."""
-    client = RecordingClient(delay=0.4)
+    """A plain switch is on the hot path of a subagent handoff: stay O(1).
+
+    The store is held on an Event for the duration of the hook, so a join would
+    cost the full 10 s gate wait rather than a scheduling hiccup.
+    """
+    client = GatedRecordingClient()
     provider = _provider(client, tmp_path)
     provider.on_session_end(MESSAGES)
+    assert client.entered.acquire(timeout=5.0), "the store must have started"
 
     started = time.monotonic()
     provider.on_session_switch("s2", parent_session_id="s1")
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.2
+    assert elapsed < 1.0, f"a plain switch blocked for {elapsed:.2f}s"
+    assert client.stored == [], "the write is still in flight, not joined"
+
+    client.gate.set()
     provider.shutdown()
     assert len(client.stored) == 1
 

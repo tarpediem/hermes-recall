@@ -39,7 +39,16 @@ class GatedClient(RecallClient):
         return "mem-1"
 
     def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None):
-        return []
+        self.entered.release()
+        self.gate.wait(timeout=10.0)
+        return [
+            {
+                "id": "m",
+                "type": "context",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "snippet": "a snippet from the old session",
+            }
+        ]
 
 
 def _provider(client, tmp_path, session_id="s1"):
@@ -150,17 +159,22 @@ def test_live_threads_are_bounded_under_a_stuck_recall(tmp_path):
     provider.shutdown()
 
 
-def test_finished_threads_are_pruned_so_the_registry_does_not_grow(tmp_path):
+def test_spawn_prunes_the_finished_thread_of_a_previous_turn(tmp_path):
+    """_spawn — not shutdown — is what keeps the registry from growing."""
     client = GatedClient()
     client.gate.set()  # never blocks
     provider = _provider(client, tmp_path)
 
-    for index in range(MAX_LIVE_THREADS + 5):
-        provider.sync_turn(USER, f"{ASSISTANT} Turn number {index}.")
-        provider.shutdown()
+    provider.sync_turn(USER, ASSISTANT)
+    assert len(provider._threads) == 1
+    provider._threads[0].join(timeout=5.0)
+    assert not provider._threads[0].is_alive()
 
-    assert len(provider._threads) <= MAX_LIVE_THREADS
-    assert len(client.stored) == MAX_LIVE_THREADS + 5
+    provider.sync_turn(USER, ASSISTANT + " A second turn.")
+
+    assert len(provider._threads) == 1, "the finished thread was not pruned"
+    provider.shutdown()
+    assert len(client.stored) == 2
 
 
 def test_spawned_threads_are_daemons(tmp_path):
@@ -175,3 +189,20 @@ def test_spawned_threads_are_daemons(tmp_path):
     client.gate.set()
     provider.shutdown()
     assert threading.active_count() >= 1
+
+
+def test_an_in_flight_prefetch_cannot_resurrect_a_flushed_cache_entry(tmp_path):
+    """Ruling 2's leak: re-init clears the cache, the old search must not refill it."""
+    client = GatedClient()
+    provider = _provider(client, tmp_path, session_id="old")
+
+    provider.queue_prefetch("a genuine question about the ingestion pipeline")
+    assert client.entered.acquire(timeout=5.0), "the search must have started"
+
+    provider.initialize("new", hermes_home=str(tmp_path), platform="cli")
+    assert provider._prefetch_cache == {}
+
+    client.gate.set()
+    provider.shutdown()
+
+    assert provider._prefetch_cache == {}, "a dead session's entry was written back"

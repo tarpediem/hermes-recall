@@ -48,6 +48,20 @@ def _register_recall_namespace() -> types.ModuleType:
 _register_recall_namespace()
 
 
+@pytest.fixture(autouse=True)
+def _clear_recall_env(monkeypatch):
+    """Every test starts with no ambient Recall env vars.
+
+    Without this, a shell exporting RECALL_API_KEY / RECALL_BASE_URL (as this
+    dev machine's global RAG MCP workflow does) leaks into RecallClient's
+    env-fallback constructor and makes env-fallback tests nondeterministic.
+    Tests that want to exercise the fallback set the vars explicitly via
+    monkeypatch.setenv.
+    """
+    monkeypatch.delenv("RECALL_API_KEY", raising=False)
+    monkeypatch.delenv("RECALL_BASE_URL", raising=False)
+
+
 @pytest.fixture()
 def recall_package():
     """Execute the real root ``__init__.py`` as the package ``recall``."""

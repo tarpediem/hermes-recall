@@ -81,6 +81,15 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             group="Writes",
         ),
         ProviderField(
+            key="extra_tools",
+            label="Extra tools",
+            kind=KIND_TEXT,
+            default="",
+            description="Comma-separated: recall_graph, who_knows, recall_stats — empty = none",
+            placeholder="recall_graph, who_knows",
+            group="Retrieval",
+        ),
+        ProviderField(
             key="max_chars",
             label="Max characters per memory",
             kind=KIND_NUMBER,

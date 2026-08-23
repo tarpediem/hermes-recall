@@ -62,6 +62,13 @@ logger = logging.getLogger(__name__)
 CONFIG_DIRNAME = "recall"
 CONFIG_FILENAME = "config.json"
 SNIPPET_CHARS = 300
+# Caps applied to an extra tool's raw REST payload before the model sees it:
+# a graph traversal or a stats dump can be arbitrarily large, and a tool
+# result that does not fit in a reply is worse than no tool at all.
+EXTRA_MAX_ITEMS = 10
+EXTRA_MAX_KEYS = 20
+EXTRA_MAX_DEPTH = 4
+EXTRA_DEPTH_MARKER = "…"
 # Hard cap on concurrently live background threads. Reached only when Recall
 # is wedged (each write can hang for WRITE_TIMEOUT); beyond it, writes are
 # dropped with a warning rather than queued or awaited.
@@ -90,6 +97,9 @@ DEFAULTS: dict[str, Any] = {
     "session_summary": True,
     "max_chars": 4000,
     "min_chars": 40,
+    # Opt-in only: every enabled tool costs its schema on EVERY turn, so the
+    # default is empty and an agent that never asked pays nothing.
+    "extra_tools": [],
 }
 
 # The same surface as ``config_schema.py``, in the shape ``hermes memory
@@ -173,6 +183,17 @@ CONFIG_FIELDS: list[dict[str, Any]] = [
         "default": DEFAULTS["min_chars"],
         "required": False,
     },
+    {
+        "key": "extra_tools",
+        # The default is the empty LIST in DEFAULTS; a text widget can only
+        # carry the empty STRING, and _coerce_config_value maps one to the
+        # other. Declaring [] here would render as "[]" in the wizard prompt
+        # and be saved back as the literal name "[]".
+        "description": "Comma-separated: recall_graph, who_knows, recall_stats — empty = none",
+        "type": "text",
+        "default": "",
+        "required": False,
+    },
 ]
 
 
@@ -186,6 +207,15 @@ def _coerce_config_value(key: str, value: Any) -> Any:
     comparison later.
     """
     default = DEFAULTS[key]
+    if isinstance(default, list):
+        # The wizard prompts return one string; the dashboard panel's text
+        # field does too. A comma-separated list is the only shape a text
+        # widget can carry, so it is the shape accepted here.
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        if isinstance(value, list):
+            return list(value)
+        return list(default)
     if isinstance(default, bool):
         if isinstance(value, bool):
             return value
@@ -273,6 +303,88 @@ STORE_TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
+# Opt-in, read-only extras. None of these is exposed unless its name is listed
+# in the ``extra_tools`` config key — a schema the model never uses is pure
+# prompt tax, paid on every single turn.
+EXTRA_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "recall_graph": {
+        "name": "recall_graph",
+        "description": (
+            "Explore how stored memories and entities connect: the entities around a "
+            "subject and the relations between them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Entity or subject to explore."},
+                "depth": {
+                    "type": "integer",
+                    "description": "How many hops to traverse (1-5).",
+                    "default": 2,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "How many entities to return (1-50).",
+                    "default": 10,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    "who_knows": {
+        "name": "who_knows",
+        "description": (
+            "Find the people most connected to a topic in memory — who worked on it, "
+            "who to ask about it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Topic to find people for."},
+                "n_results": {
+                    "type": "integer",
+                    "description": "How many people to return (1-20).",
+                    "default": 5,
+                },
+            },
+            "required": ["topic"],
+        },
+    },
+    "recall_stats": {
+        "name": "recall_stats",
+        "description": (
+            "Memory store statistics: how much is stored, and the knowledge graph "
+            "numbers when the graph is reachable."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+
+def _trim_for_model(value: Any, depth: int = 0) -> Any:
+    """Shrink a raw REST payload to something a model can actually read.
+
+    Strings are snippet-truncated, lists and dicts are capped, and anything
+    below ``EXTRA_MAX_DEPTH`` is replaced by a marker: these endpoints answer
+    whatever the graph holds, and dumping that verbatim into a tool result
+    would blow the reply budget the tool exists to serve.
+    """
+    if isinstance(value, str):
+        return truncate(value, SNIPPET_CHARS)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if depth >= EXTRA_MAX_DEPTH:
+        return EXTRA_DEPTH_MARKER
+    if isinstance(value, (list, tuple)):
+        return [_trim_for_model(item, depth + 1) for item in list(value)[:EXTRA_MAX_ITEMS]]
+    if isinstance(value, dict):
+        return {
+            str(key): _trim_for_model(item, depth + 1)
+            for key, item in list(value.items())[:EXTRA_MAX_KEYS]
+        }
+    return truncate(str(value), SNIPPET_CHARS)
+
+
 def recall_config_path(hermes_home: str) -> Path:
     """``$HERMES_HOME/recall/config.json`` — where the dashboard panel writes.
 
@@ -344,6 +456,9 @@ class RecallMemoryProvider(MemoryProvider):
         # prefetch writes its entry back after the flush, under a session key
         # that will never be read or evicted again.
         self._cache_generation = 0
+        # An unknown name in ``extra_tools`` is worth exactly one line per
+        # session: get_tool_schemas() is called on every turn.
+        self._unknown_extras_warned = False
 
     # -- identity / availability ------------------------------------------
 
@@ -383,6 +498,7 @@ class RecallMemoryProvider(MemoryProvider):
             self._agent_context = str(kwargs.get("agent_context") or "primary")
             self._writes_enabled = self._agent_context == "primary"
             self._auth_warned = False
+            self._unknown_extras_warned = False
             self._reset_read_backoff()
             self._prefetch_cache.clear()
             self._cache_generation += 1
@@ -400,11 +516,51 @@ class RecallMemoryProvider(MemoryProvider):
 
     # -- tools -------------------------------------------------------------
 
+    def _enabled_extra_tools(self) -> list[str]:
+        """The configured ``extra_tools``, in order, deduplicated, validated.
+
+        An unknown name is dropped rather than raised on: a typo in a config
+        file must cost the agent the tool it misspelled, never its memory.
+        """
+        raw = self._config.get("extra_tools") or []
+        if isinstance(raw, str):
+            raw = [part for part in raw.split(",")]
+        if not isinstance(raw, (list, tuple)):
+            return []
+
+        names: list[str] = []
+        unknown: list[str] = []
+        for entry in raw:
+            name = str(entry).strip()
+            if not name:
+                continue
+            if name not in EXTRA_TOOL_SCHEMAS:
+                unknown.append(name)
+            elif name not in names:
+                names.append(name)
+        if unknown and not self._unknown_extras_warned:
+            self._unknown_extras_warned = True
+            logger.warning(
+                "Recall extra_tools: ignoring unknown tool(s) %s — known: %s",
+                ", ".join(sorted(set(unknown))),
+                ", ".join(sorted(EXTRA_TOOL_SCHEMAS)),
+            )
+        return names
+
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Deep copies: these dicts are handed to the tool registry, and a
         caller that annotates one in place would otherwise mutate the module
-        constant for every provider instance in the process."""
-        return copy.deepcopy([SEARCH_TOOL_SCHEMA, STORE_TOOL_SCHEMA])
+        constant for every provider instance in the process.
+
+        The two base tools are always there; the extras only when the agent
+        opted into them, since each one costs its schema on every turn.
+        """
+        try:
+            extras = [EXTRA_TOOL_SCHEMAS[name] for name in self._enabled_extra_tools()]
+        except Exception as exc:  # a broken config must not cost the base tools
+            logger.warning("Recall extra_tools unreadable (%s)", type(exc).__name__)
+            extras = []
+        return copy.deepcopy([SEARCH_TOOL_SCHEMA, STORE_TOOL_SCHEMA, *extras])
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
         try:
@@ -412,6 +568,13 @@ class RecallMemoryProvider(MemoryProvider):
                 return self._tool_search(args or {})
             if tool_name == "recall_store":
                 return self._tool_store(args or {})
+            # The extras are read-only, so neither write switch gates them.
+            if tool_name == "recall_graph":
+                return self._tool_graph(args or {})
+            if tool_name == "who_knows":
+                return self._tool_who_knows(args or {})
+            if tool_name == "recall_stats":
+                return self._tool_stats(args or {})
             return tool_error(f"Unknown tool: {tool_name}")
         except Exception as exc:
             self._log_failure(f"tool {tool_name}", exc)
@@ -459,6 +622,57 @@ class RecallMemoryProvider(MemoryProvider):
                 }
             )
         return json.dumps({"count": len(results), "results": results}, ensure_ascii=False)
+
+    def _tool_graph(self, args: dict[str, Any]) -> str:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return tool_error("query is required")
+        depth = self._int_arg(args, "depth", 2)
+        limit = self._int_arg(args, "limit", 10)
+        try:
+            payload = self._client.graph_recall(
+                query, depth=depth, limit=limit, timeout=SLOW_READ_TIMEOUT
+            )
+        except Exception as exc:
+            self._log_failure("graph recall", exc)
+            return tool_error("Recall graph recall failed")
+
+        self._reset_read_backoff()
+        if isinstance(payload, list):
+            # The endpoint may answer a bare array; keep the true size next to
+            # the capped sample so the model knows it is looking at a sample.
+            body: dict[str, Any] = {"count": len(payload), "results": _trim_for_model(payload)}
+        else:
+            body = _trim_for_model(payload) if isinstance(payload, dict) else {}
+        return json.dumps(body, ensure_ascii=False)
+
+    def _tool_who_knows(self, args: dict[str, Any]) -> str:
+        topic = str(args.get("topic") or "").strip()
+        if not topic:
+            return tool_error("topic is required")
+        n_results = self._int_arg(args, "n_results", 5)
+        try:
+            payload = self._client.who_knows(
+                topic, n_results=n_results, timeout=SLOW_READ_TIMEOUT
+            )
+        except Exception as exc:
+            self._log_failure("who knows", exc)
+            return tool_error("Recall who_knows failed")
+
+        self._reset_read_backoff()
+        body = _trim_for_model(payload) if isinstance(payload, dict) else {}
+        return json.dumps(body, ensure_ascii=False)
+
+    def _tool_stats(self, args: dict[str, Any]) -> str:
+        try:
+            payload = self._client.stats(timeout=SLOW_READ_TIMEOUT)
+        except Exception as exc:
+            self._log_failure("stats", exc)
+            return tool_error("Recall stats failed")
+
+        self._reset_read_backoff()
+        body = _trim_for_model(payload) if isinstance(payload, dict) else {}
+        return json.dumps(body, ensure_ascii=False)
 
     def _tool_store(self, args: dict[str, Any]) -> str:
         content = str(args.get("content") or "").strip()
@@ -544,6 +758,16 @@ class RecallMemoryProvider(MemoryProvider):
         ``agent_context`` at initialize() — and both must be true to store.
         """
         return bool(self._config.get("writes_enabled", True))
+
+    @staticmethod
+    def _int_arg(args: dict[str, Any], key: str, fallback: int) -> int:
+        """A model-supplied integer, or the documented default. The client
+        clamps the range; this only has to survive ``"3"``, ``None`` and junk."""
+        try:
+            value = args.get(key)
+            return fallback if value is None else int(value)
+        except (AttributeError, TypeError, ValueError):
+            return fallback
 
     def _tags(self, *extra: str) -> list[str]:
         tags = ["hermes"]

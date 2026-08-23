@@ -63,6 +63,7 @@ writes) merged over these defaults:
 | `session_summary` | `True` | write an end-of-session synthesis |
 | `max_chars` | `4000` | truncation cap on any stored content |
 | `min_chars` | `40` | minimum combined turn length worth storing |
+| `extra_tools` | `[]` | opt-in extra tools, comma-separated. Empty = none (see [Optional extra tools](#optional-extra-tools)) |
 
 Example `$HERMES_HOME/recall/config.json`:
 

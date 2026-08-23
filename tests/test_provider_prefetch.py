@@ -1,0 +1,217 @@
+"""Prefetch cache, injected format, and the recall_status contract."""
+
+from recall._client import RecallClient, RecallError
+from recall._provider import RecallMemoryProvider
+
+
+class RecordingClient(RecallClient):
+    """A RecallClient whose search() is scripted — no HTTP involved."""
+
+    def __init__(self, results=None, raiser=None):
+        super().__init__(api_key="rag_k", base_url="https://recall.example")
+        self.results = results if results is not None else []
+        self.raiser = raiser
+        self.calls = []
+
+    def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None):
+        self.calls.append(
+            {
+                "query": query,
+                "limit": limit,
+                "rerank": rerank,
+                "graph_boost": graph_boost,
+                "tags": tags,
+            }
+        )
+        if self.raiser is not None:
+            raise self.raiser
+        return self.results
+
+
+ITEMS = [
+    {
+        "id": "m1",
+        "type": "decision",
+        "timestamp": "2026-07-21T03:11:00Z",
+        "snippet": "Marker extraction moved back to GPU with page-by-page chunking",
+        "score": 0.91,
+    },
+    {
+        "id": "m2",
+        "type": "bugfix",
+        "timestamp": "2026-07-10T02:17:00Z",
+        "snippet": "pgvector delete() with an empty ids list wiped the collection",
+        "score": 0.84,
+    },
+]
+
+
+def _provider(client, tmp_path, **init):
+    provider = RecallMemoryProvider(client)
+    provider.initialize(init.pop("session_id", "s1"), hermes_home=str(tmp_path), **init)
+    return provider
+
+
+def test_prefetch_cold_cache_calls_search_and_returns_the_block(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    block = provider.prefetch("where did marker extraction go", session_id="s1")
+
+    assert block.startswith("Relevant memories (Recall):")
+    assert "[decision, 2026-07-21]" in block
+    assert "[bugfix, 2026-07-10]" in block
+    assert "Marker extraction moved back to GPU" in block
+    assert len(client.calls) == 1
+
+
+def test_prefetch_sends_the_configured_search_parameters(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.prefetch("a real question about the graph indexer", session_id="s1")
+
+    call = client.calls[0]
+    assert call["limit"] == 5
+    assert call["rerank"] is True
+    assert call["graph_boost"] is False
+    assert call["tags"] is None
+
+
+def test_prefetch_truncates_each_snippet_to_300_chars(tmp_path):
+    long_item = [
+        {
+            "id": "m",
+            "type": "context",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "snippet": "x" * 900,
+        }
+    ]
+    provider = _provider(RecordingClient(long_item), tmp_path)
+
+    block = provider.prefetch("a genuine question about something", session_id="s1")
+
+    body = block.splitlines()[1]
+    assert len(body) <= len("- [context, 2026-01-01] ") + 300
+
+
+def test_prefetch_returns_empty_for_a_trivial_prompt_without_calling(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    assert provider.prefetch("thanks!", session_id="s1") == ""
+    assert client.calls == []
+
+
+def test_prefetch_returns_empty_when_there_are_no_items(tmp_path):
+    provider = _provider(RecordingClient([]), tmp_path)
+
+    assert provider.prefetch("a genuine question about something", session_id="s1") == ""
+
+
+def test_queue_prefetch_warms_the_cache_so_prefetch_makes_no_call(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.queue_prefetch("a genuine question about something", session_id="s1")
+    provider.shutdown()
+    calls_after_warm = len(client.calls)
+
+    block = provider.prefetch("a genuine question about something", session_id="s1")
+
+    assert block.startswith("Relevant memories (Recall):")
+    assert len(client.calls) == calls_after_warm == 1
+
+
+def test_queue_prefetch_is_a_noop_for_a_trivial_prompt(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.queue_prefetch("ok", session_id="s1")
+    provider.shutdown()
+
+    assert client.calls == []
+
+
+def test_cache_is_scoped_per_session(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.queue_prefetch("a genuine question about something", session_id="s1")
+    provider.shutdown()
+    provider.prefetch("a genuine question about something", session_id="s2")
+
+    assert len(client.calls) == 2
+
+
+def test_prefetch_consumes_the_cache_once(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.queue_prefetch("a genuine question about something", session_id="s1")
+    provider.shutdown()
+    provider.prefetch("a genuine question about something", session_id="s1")
+    provider.prefetch("a genuine question about something", session_id="s1")
+
+    assert len(client.calls) == 2
+
+
+def test_prefetch_returns_empty_when_search_raises(tmp_path):
+    provider = _provider(RecordingClient(raiser=RecallError("timeout")), tmp_path)
+
+    assert provider.prefetch("a genuine question about something", session_id="s1") == ""
+
+
+def test_prefetch_returns_empty_when_the_client_raises_anything(tmp_path):
+    provider = _provider(RecordingClient(raiser=RuntimeError("kaboom")), tmp_path)
+
+    assert provider.prefetch("a genuine question about something", session_id="s1") == ""
+
+
+def test_recall_status_reports_the_last_prefetch(tmp_path):
+    provider = _provider(RecordingClient(ITEMS), tmp_path)
+
+    provider.prefetch("a genuine question about something", session_id="s1")
+    status = provider.recall_status()
+
+    assert status is not None
+    assert status.provider_label == "Recall"
+    assert status.count == 2
+    assert status.glyph == "🧠"
+
+
+def test_recall_status_is_none_before_any_prefetch(tmp_path):
+    assert _provider(RecordingClient(ITEMS), tmp_path).recall_status() is None
+
+
+def test_recall_status_never_returns_a_stale_count(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.prefetch("a genuine question about something", session_id="s1")
+    assert provider.recall_status().count == 2
+
+    client.results = []
+    provider.prefetch("another genuine question about something", session_id="s1")
+
+    assert provider.recall_status() is None
+
+
+def test_recall_status_is_none_after_a_trivial_prompt(tmp_path):
+    provider = _provider(RecordingClient(ITEMS), tmp_path)
+
+    provider.prefetch("a genuine question about something", session_id="s1")
+    provider.prefetch("thanks", session_id="s1")
+
+    assert provider.recall_status() is None
+
+
+def test_recall_status_is_none_after_a_failed_prefetch(tmp_path):
+    client = RecordingClient(ITEMS)
+    provider = _provider(client, tmp_path)
+
+    provider.prefetch("a genuine question about something", session_id="s1")
+    client.raiser = RecallError("down")
+    provider.prefetch("another genuine question about something", session_id="s1")
+
+    assert provider.recall_status() is None

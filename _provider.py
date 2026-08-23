@@ -10,15 +10,17 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from agent.memory_provider import MemoryProvider
 
 from ._client import RecallAuthError, RecallClient
+from ._filters import is_trivial_prompt, truncate
 
 try:  # Present from Hermes 0.20; absent on 0.19.1.
-    from agent.memory_provider import RecallStatus  # noqa: F401  (used from Task 7 on)
+    from agent.memory_provider import RecallStatus
 except Exception:  # pragma: no cover - 0.19.1 fallback
     from dataclasses import dataclass
 
@@ -57,6 +59,22 @@ DEFAULTS: dict[str, Any] = {
     "max_chars": 4000,
     "min_chars": 40,
 }
+
+
+def _format_memories(items: list[dict[str, Any]]) -> tuple[str, int]:
+    """Render search items as the injected block. Returns ``(text, count)``."""
+    lines = []
+    for item in items:
+        snippet = str(item.get("snippet") or "").strip().replace("\n", " ")
+        if not snippet:
+            continue
+        mem_type = str(item.get("type") or "memory").strip() or "memory"
+        stamp = str(item.get("timestamp") or "")[:10]
+        prefix = f"[{mem_type}, {stamp}]" if stamp else f"[{mem_type}]"
+        lines.append(f"- {prefix} {truncate(snippet, SNIPPET_CHARS)}")
+    if not lines:
+        return "", 0
+    return "Relevant memories (Recall):\n" + "\n".join(lines), len(lines)
 
 
 def load_recall_config(hermes_home: str) -> dict[str, Any]:
@@ -195,3 +213,92 @@ class RecallMemoryProvider(MemoryProvider):
             logger.warning("Recall API key rejected during %s — update RECALL_API_KEY", operation)
             return
         logger.warning("Recall %s failed: %s", operation, exc)
+
+    # -- threading ---------------------------------------------------------
+
+    def _spawn(self, name: str, target) -> None:
+        """Start a daemon thread, joining the previous one of the same name."""
+        previous = self._threads.get(name)
+        if previous is not None and previous.is_alive():
+            previous.join(timeout=5.0)
+        thread = threading.Thread(target=target, daemon=True, name=f"recall-{name}")
+        self._threads[name] = thread
+        thread.start()
+
+    # -- recall ------------------------------------------------------------
+
+    def _search_and_cache(self, query: str, session_id: str) -> str:
+        """Run one search and cache the rendered block. Returns "" on failure."""
+        try:
+            items = self._client.search(
+                query,
+                limit=int(self._config.get("limit", 5)),
+                rerank=bool(self._config.get("rerank", True)),
+                graph_boost=bool(self._config.get("graph_boost", False)),
+            )
+        except Exception as exc:
+            self._log_failure("search", exc)
+            return ""
+        block, count = _format_memories(items)
+        key = session_id or self._session_id
+        if block:
+            self._prefetch_cache[key] = block
+            self._prefetch_counts[key] = count
+        else:
+            self._prefetch_cache.pop(key, None)
+            self._prefetch_counts.pop(key, None)
+        return block
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Return the memory block to inject. Never raises, never blocks >3 s."""
+        try:
+            if is_trivial_prompt(query):
+                self._last_count = 0
+                return ""
+            key = session_id or self._session_id
+            cached = self._prefetch_cache.pop(key, None)
+            if cached:
+                self._last_count = self._prefetch_counts.pop(key, 0)
+                return cached
+            block = self._search_and_cache(query, key)
+            # A cold synchronous hit is consumed immediately, not left cached.
+            self._last_count = self._prefetch_counts.pop(key, 0)
+            self._prefetch_cache.pop(key, None)
+            return block
+        except Exception as exc:
+            self._log_failure("prefetch", exc)
+            self._last_count = 0
+            return ""
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        """Warm the cache in the background for the next turn."""
+        try:
+            if is_trivial_prompt(query):
+                return
+            key = session_id or self._session_id
+            self._spawn("prefetch", lambda: self._search_and_cache(query, key))
+        except Exception as exc:
+            self._log_failure("queue_prefetch", exc)
+
+    def recall_status(self) -> RecallStatus | None:
+        """Describe ONLY the most recent prefetch. Never a stale count."""
+        try:
+            if not self._last_count:
+                return None
+            return RecallStatus(
+                provider_label=PROVIDER_LABEL, count=self._last_count, glyph=GLYPH
+            )
+        except Exception:
+            return None
+
+    # -- shutdown ----------------------------------------------------------
+
+    def shutdown(self) -> None:
+        """Join every live background thread within a 5 s total budget."""
+        deadline = time.monotonic() + 5.0
+        for thread in list(self._threads.values()):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if thread.is_alive():
+                thread.join(timeout=remaining)

@@ -19,6 +19,7 @@ from agent.memory_provider import MemoryProvider
 from ._client import RecallAuthError, RecallClient
 from ._filters import (
     condense_turn,
+    extract_insights,
     is_trivial_prompt,
     is_worth_storing,
     summarize_session,
@@ -58,6 +59,7 @@ SNIPPET_CHARS = 300
 MAX_LIVE_THREADS = 16
 SHUTDOWN_BUDGET_SECONDS = 5.0
 SESSION_MIN_TURNS = 2
+PRE_COMPRESS_MAX_INSIGHTS = 8
 PROVIDER_LABEL = "Recall"
 GLYPH = "🧠"
 
@@ -552,6 +554,40 @@ class RecallMemoryProvider(MemoryProvider):
                 self._session_id = new_session_id
         except Exception as exc:
             self._log_failure("on_session_switch", exc)
+
+    def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
+        """Archive what is about to be discarded, and tell the compressor
+        what Recall judged worth keeping.
+
+        (a) background: condense the discarded messages and store them with
+            the ``pre-compress`` tag.
+        (b) synchronous: return an insight block that Hermes feeds into the
+            compression summary prompt.
+        """
+        try:
+            archive = summarize_session(
+                messages,
+                max_chars=int(self._config.get("max_chars", 4000)),
+                min_turns=SESSION_MIN_TURNS,
+            )
+            if archive is not None:
+                content, memory_type = archive
+                self._store_async(
+                    "precompress",
+                    content,
+                    memory_type=memory_type,
+                    tags=self._tags("pre-compress"),
+                )
+
+            insights = extract_insights(messages, max_items=PRE_COMPRESS_MAX_INSIGHTS)
+            if not insights:
+                return ""
+            lines = ["Insights to preserve from the discarded context:"]
+            lines += [f"- {item}" for item in insights]
+            return "\n".join(lines)
+        except Exception as exc:
+            self._log_failure("on_pre_compress", exc)
+            return ""
 
     # -- shutdown ----------------------------------------------------------
 

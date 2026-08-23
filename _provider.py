@@ -16,7 +16,7 @@ from typing import Any
 
 from agent.memory_provider import MemoryProvider
 
-from ._client import RecallAuthError, RecallClient
+from ._client import MEMORY_TYPES, RecallAuthError, RecallClient
 from ._filters import (
     condense_turn,
     extract_insights,
@@ -89,6 +89,58 @@ def _format_memories(items: list[dict[str, Any]]) -> tuple[str, int]:
     if not lines:
         return "", 0
     return "Relevant memories (Recall):\n" + "\n".join(lines), len(lines)
+
+
+SEARCH_TOOL_SCHEMA: dict[str, Any] = {
+    "name": "recall_search",
+    "description": (
+        "Search Recall, the persistent cross-session memory, for anything from the "
+        "past: prior decisions and their rationale, resolved bugs, people, machines, "
+        "configs, procedures. Use it before asking the user something that may "
+        "already be known."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to look for."},
+            "limit": {
+                "type": "integer",
+                "description": "How many memories to return (1-100).",
+                "default": 5,
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+STORE_TOOL_SCHEMA: dict[str, Any] = {
+    "name": "recall_store",
+    "description": (
+        "Pin something durable in Recall: a decision and why it was taken, a lasting "
+        "preference, a resolved bug (symptom + cause + fix), a procedure. Turns and "
+        "session summaries are already written automatically — do not restate the "
+        "current turn or re-store memories that were injected into this context."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "The memory to store."},
+            "memory_type": {
+                "type": "string",
+                "description": "Kind of memory.",
+                "enum": ["context", "decision", "bugfix", "architecture", "preference", "snippet"],
+                "default": "context",
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Extra tags to attach.",
+                "default": [],
+            },
+        },
+        "required": ["content"],
+    },
+}
 
 
 def load_recall_config(hermes_home: str) -> dict[str, Any]:
@@ -202,8 +254,74 @@ class RecallMemoryProvider(MemoryProvider):
     # -- tools -------------------------------------------------------------
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        """Placeholder so the ABC is satisfied; Task 8 declares the real tools."""
-        return []
+        return [SEARCH_TOOL_SCHEMA, STORE_TOOL_SCHEMA]
+
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
+        try:
+            if tool_name == "recall_search":
+                return self._tool_search(args or {})
+            if tool_name == "recall_store":
+                return self._tool_store(args or {})
+            return tool_error(f"Unknown tool: {tool_name}")
+        except Exception as exc:
+            self._log_failure(f"tool {tool_name}", exc)
+            return tool_error("Recall tool call failed")
+
+    def _tool_search(self, args: dict[str, Any]) -> str:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return tool_error("query is required")
+        try:
+            limit = int(args.get("limit") or self._config.get("limit", 5))
+        except (TypeError, ValueError):
+            limit = int(self._config.get("limit", 5))
+        try:
+            items = self._client.search(
+                query,
+                limit=limit,
+                rerank=bool(self._config.get("rerank", True)),
+                graph_boost=bool(self._config.get("graph_boost", False)),
+            )
+        except Exception as exc:
+            self._log_failure("search", exc)
+            return tool_error("Recall search failed")
+
+        results = [
+            {
+                "id": item.get("id", ""),
+                "type": item.get("type", "memory"),
+                "timestamp": item.get("timestamp", ""),
+                "score": item.get("score"),
+                "snippet": truncate(str(item.get("snippet") or ""), SNIPPET_CHARS),
+            }
+            for item in items
+        ]
+        return json.dumps({"count": len(results), "results": results}, ensure_ascii=False)
+
+    def _tool_store(self, args: dict[str, Any]) -> str:
+        content = str(args.get("content") or "").strip()
+        if not content:
+            return tool_error("content is required")
+        memory_type = str(args.get("memory_type") or "context")
+        if memory_type not in MEMORY_TYPES:
+            return tool_error(f"memory_type must be one of {sorted(MEMORY_TYPES)}")
+        if not self._writes_enabled:
+            return tool_error(
+                f"Recall writes are disabled in the '{self._agent_context}' agent context"
+            )
+
+        extra = args.get("tags") or []
+        extra_tags = [str(t) for t in extra if str(t).strip()] if isinstance(extra, list) else []
+        tags = self._tags("model-tool", *extra_tags)
+        body = truncate(content, int(self._config.get("max_chars", 4000)))
+        try:
+            memory_id = self._client.store(
+                body, memory_type=memory_type, scope="project", tags=tags
+            )
+        except Exception as exc:
+            self._log_failure("store", exc)
+            return tool_error("Recall store failed")
+        return json.dumps({"stored": True, "memory_id": memory_id}, ensure_ascii=False)
 
     # -- config ------------------------------------------------------------
 

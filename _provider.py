@@ -97,9 +97,12 @@ DEFAULTS: dict[str, Any] = {
     "session_summary": True,
     "max_chars": 4000,
     "min_chars": 40,
-    # Opt-in only: every enabled tool costs its schema on EVERY turn, so the
-    # default is empty and an agent that never asked pays nothing.
-    "extra_tools": [],
+    # Shipped ENABLED: each one costs its schema on EVERY turn, but an end
+    # user should get the whole surface without editing a config file. The
+    # order is stable — it is the order the schemas are advertised in.
+    # ``extra_tools`` remains the authorization boundary: an explicit empty
+    # list (or an empty string from the dashboard) turns all three off.
+    "extra_tools": ["recall_graph", "who_knows", "recall_stats"],
 }
 
 # The same surface as ``config_schema.py``, in the shape ``hermes memory
@@ -185,13 +188,17 @@ CONFIG_FIELDS: list[dict[str, Any]] = [
     },
     {
         "key": "extra_tools",
-        # The default is the empty LIST in DEFAULTS; a text widget can only
-        # carry the empty STRING, and _coerce_config_value maps one to the
-        # other. Declaring [] here would render as "[]" in the wizard prompt
-        # and be saved back as the literal name "[]".
-        "description": "Comma-separated: recall_graph, who_knows, recall_stats — empty = none",
+        # DEFAULTS holds a LIST; a text widget can only carry a STRING, and
+        # _coerce_config_value maps one to the other. Declaring the list here
+        # would render as "['recall_graph', ...]" in the wizard prompt and be
+        # saved back as literal names with brackets and quotes in them.
+        # Clearing the field yields "", which coerces to [] — the disable path.
+        "description": (
+            "Comma-separated extra tools, all three enabled by default — "
+            "clear this field to disable them"
+        ),
         "type": "text",
-        "default": "",
+        "default": "recall_graph, who_knows, recall_stats",
         "required": False,
     },
 ]
@@ -552,8 +559,9 @@ class RecallMemoryProvider(MemoryProvider):
         caller that annotates one in place would otherwise mutate the module
         constant for every provider instance in the process.
 
-        The two base tools are always there; the extras only when the agent
-        opted into them, since each one costs its schema on every turn.
+        The two base tools are always there; the three extras are there too
+        unless the agent switched them off, since each one costs its schema
+        on every turn.
         """
         try:
             extras = [EXTRA_TOOL_SCHEMAS[name] for name in self._enabled_extra_tools()]

@@ -1,5 +1,5 @@
 name: recall
-version: 1.1.0
+version: 1.2.0
 description: "Recall — persistent cross-session memory over the Recall REST API (search before each turn, filtered writes after, session synthesis at the end)."
 requires_env:
   - RECALL_API_KEY

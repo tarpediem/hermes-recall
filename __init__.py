@@ -15,7 +15,7 @@ from pathlib import Path
 from ._client import RecallAuthError, RecallClient, RecallError
 from ._provider import RecallMemoryProvider
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 SKILLS_DIR = Path(__file__).parent / "skills"
 

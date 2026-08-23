@@ -407,20 +407,35 @@ EXTRA_CALLS = [
 ]
 
 
-@pytest.fixture()
-def provider_with_extras(tmp_path):
-    """A provider that opted into all three extras."""
+def _write_extra_tools(tmp_path, value):
     import json as _json
 
     from recall._provider import recall_config_path
 
     path = recall_config_path(str(tmp_path))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        _json.dumps({"extra_tools": ["recall_graph", "who_knows", "recall_stats"]}),
-        encoding="utf-8",
-    )
+    path.write_text(_json.dumps({"extra_tools": value}), encoding="utf-8")
+
+
+@pytest.fixture()
+def provider_with_extras(tmp_path):
+    """A provider with all three extras — which is also the default."""
+    _write_extra_tools(tmp_path, ["recall_graph", "who_knows", "recall_stats"])
     p = make_provider(tmp_path)
+    yield p
+    p.shutdown()
+
+
+@pytest.fixture()
+def provider_without_extras(tmp_path):
+    """A provider that switched the extras off explicitly.
+
+    Its own HERMES_HOME: the ``provider`` fixture shares ``tmp_path`` and
+    must keep reading the default config, not this one.
+    """
+    home = tmp_path / "extras-off"
+    _write_extra_tools(home, [])
+    p = make_provider(home)
     yield p
     p.shutdown()
 
@@ -443,9 +458,12 @@ def test_the_extras_return_json_under_every_fault(
     assert_no_key(caplog, raw)
 
 
-def test_the_extras_are_exposed_only_once_opted_in(provider, provider_with_extras, caplog):
-    assert [s["name"] for s in provider.get_tool_schemas()] == ["recall_search", "recall_store"]
-    assert [s["name"] for s in provider_with_extras.get_tool_schemas()] == [
+def test_the_extras_are_exposed_unless_switched_off(provider_without_extras, provider, caplog):
+    assert [s["name"] for s in provider_without_extras.get_tool_schemas()] == [
+        "recall_search",
+        "recall_store",
+    ]
+    assert [s["name"] for s in provider.get_tool_schemas()] == [
         "recall_search",
         "recall_store",
         "recall_graph",
@@ -477,9 +495,10 @@ def test_the_extras_reach_the_transport_with_the_off_turn_budget(tmp_path, monke
 
 @pytest.mark.parametrize("name,args", EXTRA_CALLS, ids=[c[0] for c in EXTRA_CALLS])
 def test_a_disabled_extra_never_reaches_the_transport(name, args, tmp_path, monkeypatch, caplog):
-    """extra_tools is an authorization boundary: no config, no capability."""
+    """extra_tools is an authorization boundary: switched off, no capability."""
     fake = ExplodingRequests(lambda: requests.exceptions.Timeout("read timed out"))
     monkeypatch.setattr(_client, "requests", fake)
+    _write_extra_tools(tmp_path, [])
     provider = make_provider(tmp_path)
 
     raw = provider.handle_tool_call(name, args)
@@ -527,11 +546,17 @@ def test_get_config_schema_never_carries_the_key(provider, fault, caplog):
     assert_no_key(caplog, schema)
 
 
-def test_get_tool_schemas_is_a_list_of_two_by_default(provider, fault, caplog):
-    """No extra_tools configured: the extras cost nothing, not even a schema."""
+def test_get_tool_schemas_is_a_list_of_five_by_default(provider, fault, caplog):
+    """No extra_tools configured: the three extras ship enabled."""
     schemas = provider.get_tool_schemas()
 
-    assert [s["name"] for s in schemas] == ["recall_search", "recall_store"]
+    assert [s["name"] for s in schemas] == [
+        "recall_search",
+        "recall_store",
+        "recall_graph",
+        "who_knows",
+        "recall_stats",
+    ]
     assert_no_key(caplog, schemas)
 
 

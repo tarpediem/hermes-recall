@@ -1,8 +1,10 @@
-"""The opt-in extra tools: off by default, per-agent, read-only.
+"""The three extra tools: shipped ENABLED, per-agent, read-only.
 
-Enabling one costs its schema on every turn, so the contract under test is
-"zero cost unless the agent asked for it": the default config must expose
-exactly the two base tools and nothing else.
+They cost their schema on every turn, but the owner's call is that an end
+user should get them without touching a config file. ``extra_tools`` stays
+the authorization boundary in both directions: it is what turns them off —
+an explicit empty list (or an empty string from the dashboard's text field)
+leaves exactly the two base tools, and the three names stop being callable.
 """
 
 import json
@@ -74,18 +76,62 @@ def _provider(tmp_path, client=None, config=None, write_config=None, **init):
 ALL_EXTRAS = ["recall_graph", "who_knows", "recall_stats"]
 
 
-# -- default: nothing extra --------------------------------------------------
+# -- default: the three extras are on ----------------------------------------
 
 
-def test_extra_tools_defaults_to_empty(tmp_path):
-    assert DEFAULTS["extra_tools"] == []
-    assert load_recall_config(str(tmp_path))["extra_tools"] == []
+def test_extra_tools_defaults_to_the_three_extras(tmp_path):
+    assert DEFAULTS["extra_tools"] == ALL_EXTRAS
+    assert load_recall_config(str(tmp_path))["extra_tools"] == ALL_EXTRAS
 
 
-def test_no_extra_schema_is_exposed_by_default(tmp_path):
+def test_every_schema_is_exposed_by_default_in_a_stable_order(tmp_path):
     schemas = _provider(tmp_path).get_tool_schemas()
 
-    assert [s["name"] for s in schemas] == ["recall_search", "recall_store"]
+    assert [s["name"] for s in schemas] == ["recall_search", "recall_store", *ALL_EXTRAS]
+
+
+def test_the_default_schemas_are_copies_not_module_references(tmp_path):
+    """The default path hands out the module constants too — deep-copied."""
+    provider = _provider(tmp_path)
+
+    first = provider.get_tool_schemas()
+    first[2]["description"] = "mutated"
+
+    assert provider.get_tool_schemas()[2]["description"] != "mutated"
+    assert EXTRA_TOOL_SCHEMAS["recall_graph"]["description"] != "mutated"
+
+
+@pytest.mark.parametrize("name", ALL_EXTRAS)
+def test_every_extra_is_callable_by_default(name, tmp_path):
+    client = RecordingClient()
+
+    payload = json.loads(
+        _provider(tmp_path, client).handle_tool_call(name, {"query": "q", "topic": "t"})
+    )
+
+    assert "error" not in payload
+    assert len(client.calls) == 1
+
+
+# -- turning them off --------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [[], ""])
+def test_an_explicit_empty_value_disables_every_extra(value, tmp_path, write_recall_config):
+    """``[]`` in config.json and "" from the dashboard's text field are the
+    disable path — neither may fall back to the (now non-empty) default."""
+    write_recall_config(tmp_path, {"extra_tools": value})
+
+    assert load_recall_config(str(tmp_path))["extra_tools"] == []
+
+    client = RecordingClient()
+    provider = _provider(tmp_path, client)
+    assert [s["name"] for s in provider.get_tool_schemas()] == ["recall_search", "recall_store"]
+
+    for name in ALL_EXTRAS:
+        payload = json.loads(provider.handle_tool_call(name, {"query": "q", "topic": "t"}))
+        assert payload["error"] == f"Unknown tool: {name}"
+    assert client.calls == []
 
 
 def test_the_three_extras_are_declared(tmp_path):
@@ -176,9 +222,11 @@ def test_a_csv_string_from_the_wizard_is_coerced_to_a_list(tmp_path, write_recal
 def test_a_nonsense_extra_tools_value_falls_back_to_the_default(
     value, tmp_path, write_recall_config
 ):
+    """Junk means "I did not say" — the default. Note "" is NOT junk: it is
+    the dashboard's disable path, covered above."""
     write_recall_config(tmp_path, {"extra_tools": value})
 
-    assert load_recall_config(str(tmp_path))["extra_tools"] == []
+    assert load_recall_config(str(tmp_path))["extra_tools"] == ALL_EXTRAS
 
 
 # -- dispatch ----------------------------------------------------------------
@@ -311,10 +359,15 @@ def test_recall_stats_degrades_without_the_graph_numbers(tmp_path, write_recall_
         ("recall_stats", {}),
     ],
 )
-def test_a_disabled_extra_is_an_unknown_tool_and_makes_no_call(name, args, tmp_path):
-    """The names are public (README); a guessed call must not reach Recall."""
+def test_a_disabled_extra_is_an_unknown_tool_and_makes_no_call(
+    name, args, tmp_path, write_recall_config
+):
+    """The names are public (README); a call to one an agent switched OFF
+    must not reach Recall."""
     client = RecordingClient()
-    provider = _provider(tmp_path, client)
+    provider = _provider(
+        tmp_path, client, config={"extra_tools": []}, write_config=write_recall_config
+    )
 
     payload = json.loads(provider.handle_tool_call(name, args))
 

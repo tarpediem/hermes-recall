@@ -63,7 +63,7 @@ writes) merged over these defaults:
 | `session_summary` | `True` | write an end-of-session synthesis |
 | `max_chars` | `4000` | truncation cap on any stored content |
 | `min_chars` | `40` | minimum combined turn length worth storing |
-| `extra_tools` | `[]` | opt-in extra tools, comma-separated. Empty = none (see [Optional extra tools](#optional-extra-tools)) |
+| `extra_tools` | `['recall_graph', 'who_knows', 'recall_stats']` | the three extra tools, comma-separated. All three are on out of the box; an empty value turns them off (see [Optional extra tools](#optional-extra-tools)) |
 
 Example `$HERMES_HOME/recall/config.json`:
 
@@ -80,7 +80,7 @@ Example `$HERMES_HOME/recall/config.json`:
 ### Optional extra tools
 
 Two tools — `recall_search` and `recall_store` — are always available. Three
-more are **off by default** and can be switched on per agent with the
+more are **enabled by default**, and can be switched off per agent with the
 `extra_tools` key in `$HERMES_HOME/recall/config.json`:
 
 | tool | what it does |
@@ -89,24 +89,35 @@ more are **off by default** and can be switched on per agent with the
 | `who_knows` | find the people most connected to a topic — who worked on it, who to ask |
 | `recall_stats` | memory store statistics, plus the knowledge graph numbers when the graph is reachable |
 
+You do not have to do anything to get them. To keep only some, name those:
+
 ```json
 {
   "extra_tools": "recall_graph, who_knows"
 }
 ```
 
-A list works too (`["recall_graph", "who_knows"]`); an unknown name is ignored
-with one warning. `extra_tools` is a capability switch, not just a listing: a
-tool that is not enabled is not callable either — calling it by name answers
-`Unknown tool` and never reaches Recall. All three are **read-only** — they answer even when
-`writes_enabled` is off — and they run off the turn path, so they never eat
-into the turn budget.
+**To turn all three off**, set the key to an empty value — in the dashboard,
+clear the *Extra tools* field; in `config.json`, either spelling works:
 
-**What enabling one costs.** An enabled tool's schema is sent to the model on
-every turn of every session, whether or not the tool is ever called. That is
-the whole reason the default is empty: an agent that would never use the
-knowledge graph should not pay for its description on every turn. Enable what
-that agent actually needs, nothing more.
+```json
+{
+  "extra_tools": ""
+}
+```
+
+A list works too (`["recall_graph", "who_knows"]`, or `[]` to disable); an
+unknown name is ignored with one warning. `extra_tools` is a capability
+switch, not just a listing: a tool that is not enabled is not callable either
+— calling it by name answers `Unknown tool` and never reaches Recall. All
+three are **read-only** — they answer even when `writes_enabled` is off — and
+they run off the turn path, so they never eat into the turn budget.
+
+**What keeping one enabled costs.** An enabled tool's schema is sent to the
+model on every turn of every session, whether or not the tool is ever called.
+Three extra schemas ride along on every turn of a default install. That is a
+real, if small, prompt tax: an agent that would never use the knowledge graph
+can drop `recall_graph` — or all three — and pay nothing for them.
 
 ## Check it's working
 

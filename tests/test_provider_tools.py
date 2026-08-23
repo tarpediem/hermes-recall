@@ -44,10 +44,17 @@ def _provider(client, tmp_path, **init):
     return provider
 
 
-def test_exactly_two_tools_are_exposed(tmp_path):
+def test_the_five_default_tools_are_exposed(tmp_path):
+    """Two base tools, then the three extras that ship enabled."""
     schemas = _provider(RecordingClient(), tmp_path).get_tool_schemas()
 
-    assert [s["name"] for s in schemas] == ["recall_search", "recall_store"]
+    assert [s["name"] for s in schemas] == [
+        "recall_search",
+        "recall_store",
+        "recall_graph",
+        "who_knows",
+        "recall_stats",
+    ]
 
 
 def test_search_schema_shape(tmp_path):

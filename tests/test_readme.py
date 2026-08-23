@@ -46,7 +46,7 @@ def test_readme_documents_both_tools():
 
 def test_readme_documents_the_optional_extra_tools():
     """Every extra a user can name in ``extra_tools`` must be documented, and
-    the section must say what enabling one costs."""
+    the section must say what keeping one enabled costs."""
     from recall._provider import EXTRA_TOOL_SCHEMAS
 
     text = README.read_text()
@@ -56,17 +56,25 @@ def test_readme_documents_the_optional_extra_tools():
     for name in EXTRA_TOOL_SCHEMAS:
         assert f"`{name}`" in section, name
     assert "`extra_tools`" in section
-    assert "off by default" in section.lower()
+    assert "enabled by default" in section.lower()
+    # The disable path, spelled out where someone looking for it will be.
+    assert '"extra_tools": ""' in section
     # The cost note: an enabled tool's schema rides on every turn.
     assert "every turn" in section.lower()
     assert "recall/config.json" in section
 
 
-def test_readme_does_not_promise_the_extras_by_default():
-    """The two base tools are what a default install exposes."""
+def test_readme_says_the_extras_ship_enabled_and_how_to_turn_them_off():
+    """A default install exposes all five tools; the table must say so."""
+    from recall._provider import EXTRA_TOOL_SCHEMAS
+
     text = README.read_text()
 
-    assert "`extra_tools` | `[]`" in text
+    row = [line for line in text.splitlines() if line.startswith("| `extra_tools` |")]
+    assert len(row) == 1
+    for name in EXTRA_TOOL_SCHEMAS:
+        assert name in row[0], name
+    assert "`[]`" not in row[0]
 
 
 def test_readme_states_what_leaves_the_device():

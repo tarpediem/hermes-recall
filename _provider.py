@@ -17,7 +17,7 @@ from typing import Any
 from agent.memory_provider import MemoryProvider
 
 from ._client import RecallAuthError, RecallClient
-from ._filters import is_trivial_prompt, truncate
+from ._filters import condense_turn, is_trivial_prompt, is_worth_storing, truncate
 
 try:  # Present from Hermes 0.20; absent on 0.19.1.
     from agent.memory_provider import RecallStatus
@@ -293,6 +293,69 @@ class RecallMemoryProvider(MemoryProvider):
             )
         except Exception:
             return None
+
+    # -- writes --------------------------------------------------------------
+
+    def _store_async(
+        self,
+        thread_name: str,
+        content: str,
+        *,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
+        """Single write path: gated on agent_context, off-thread, fail-open."""
+        if not self._writes_enabled or not content:
+            return
+
+        def _run() -> None:
+            try:
+                self._client.store(
+                    content, memory_type=memory_type, scope="project", tags=tags
+                )
+            except Exception as exc:
+                self._log_failure("store", exc)
+
+        self._spawn(thread_name, _run)
+
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Persist a completed turn.
+
+        ``messages`` is accepted and deliberately IGNORED: only the
+        user/assistant pair may leave the device, so tool calls and tool
+        results cannot leak workspace paths or command output into Recall.
+        """
+        try:
+            if not self._writes_enabled:
+                return
+            if not bool(self._config.get("sync_turns", True)):
+                return
+            min_chars = int(self._config.get("min_chars", 40))
+            if not is_worth_storing(user_content, assistant_content, min_chars=min_chars):
+                return
+            content = condense_turn(
+                user_content,
+                assistant_content,
+                max_chars=int(self._config.get("max_chars", 4000)),
+            )
+            session_tag = f"session:{session_id}" if session_id else ""
+            tags = ["hermes"]
+            tags.append(session_tag or (f"session:{self._session_id}" if self._session_id else ""))
+            if self._platform:
+                tags.append(f"platform:{self._platform}")
+            if self._agent_identity:
+                tags.append(f"agent:{self._agent_identity}")
+            tags = [t for t in tags if t]
+            self._store_async("sync", content, memory_type="context", tags=tags)
+        except Exception as exc:
+            self._log_failure("sync_turn", exc)
 
     # -- shutdown ----------------------------------------------------------
 

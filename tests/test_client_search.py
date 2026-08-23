@@ -61,7 +61,7 @@ def test_search_sends_the_specified_parameters(monkeypatch, client):
         "graph_boost": "false",
         "scope": "all",
     }
-    assert kwargs["timeout"] == _client.READ_TIMEOUT
+    assert kwargs["timeout"] == (_client.CONNECT_TIMEOUT, _client.READ_TIMEOUT)
     assert kwargs["headers"]["Authorization"] == "ApiKey rag_testkey"
     assert kwargs["headers"]["User-Agent"] == _client.USER_AGENT
 
@@ -164,3 +164,18 @@ def test_client_reads_env_when_not_given_explicit_values(monkeypatch):
 
 def test_requests_seam_is_a_module_attribute():
     assert isinstance(_client.requests, types.ModuleType)
+
+
+def test_the_timeout_is_a_connect_read_tuple(monkeypatch, client):
+    """A scalar timeout is a READ budget only: requests applies it to the
+    connect phase separately, so a wedged host could spend 3 s connecting AND
+    3 s reading. The tuple is what the documented budget actually costs."""
+    fake = FakeRequests(FakeResponse(200, {"items": []}))
+    monkeypatch.setattr(_client, "requests", fake)
+
+    client.search("anything")
+
+    timeout = fake.calls[0][2]["timeout"]
+    assert isinstance(timeout, tuple)
+    assert timeout == (_client.CONNECT_TIMEOUT, _client.READ_TIMEOUT)
+    assert _client.CONNECT_TIMEOUT == 1.5

@@ -652,11 +652,16 @@ class RecallMemoryProvider(MemoryProvider):
         return block
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Return the memory block to inject. Never raises, never blocks >3 s.
+        """Return the memory block to inject. Never raises.
+
+        The synchronous path costs at most a 3 s read budget plus a 1.5 s
+        connect budget — ``requests`` bills the two phases separately, so it
+        is not a single hard 3 s. Hermes 0.20.4 additionally caps the whole
+        prefetch at 8 s on its side.
 
         A cache miss — the first turn of a session, or a warm-up that has not
         landed yet — is served by a synchronous search that DROPS rerank. A
-        reranked query costs ~4.5 s and could never fit the 3 s turn budget, so
+        reranked query costs ~4.5 s and could never fit the turn budget, so
         the alternative to an unreranked hit here is no memory at all on the
         one turn where cross-session recall matters most. Every warm turn after
         it is served from the reranked warm-up.

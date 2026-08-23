@@ -122,8 +122,8 @@ Relevant memories (Recall):
 
 Hermes shows a 🧠 indicator on turns where memories were actually injected.
 
-**The first turn of a session uses an unreranked search** so it fits the 3 s
-turn budget; every turn after it is served from a reranked background warm-up
+**The first turn of a session uses an unreranked search** so it fits the turn
+budget; every turn after it is served from a reranked background warm-up
 started during the previous turn. A reranked query costs ~4.5 s against a real
 instance, which no turn-path budget can absorb — and the first turn of a
 session is exactly where cross-session recall matters most, so it gets a
@@ -231,9 +231,18 @@ API key is never logged.
   measures ~4.5 s against the public instance (cross-encoder round-trip on the
   ML API GPU) versus ~0.3 s without. The background warm-up and the
   `recall_search` tool are given a 10 s budget and absorb it; the synchronous
-  turn-path fallback keeps a hard 3 s budget, which is why it drops rerank
-  rather than inject nothing (see *What you get*). Turning `rerank` off makes
-  every turn behave like the first one: faster, ranked slightly worse.
+  turn-path fallback keeps a 3 s read budget plus a 1.5 s connect budget
+  (`requests` bills connect and read separately, so it is not a single hard
+  3 s), and Hermes 0.20.4 additionally caps the whole prefetch at 8 s on its
+  side. That is why the cold path drops rerank rather than inject nothing (see
+  *What you get*). Turning `rerank` off makes every turn behave like the first
+  one: faster, ranked slightly worse.
+- **When Recall is unreachable the plugin stops trying for a minute.** After 3
+  consecutive read failures the synchronous turn-path search is skipped for 60
+  seconds — an unreachable host would otherwise cost every turn its connect
+  budget. Background warm-ups keep trying (they are off the turn path, so
+  their latency is nobody's wait) and the first one that succeeds clears the
+  pause immediately. It is logged once, when it starts, not once per turn.
 - Background writes run on daemon threads, capped at 16 concurrently in
   flight; beyond that a wedged Recall causes writes to be dropped (logged),
   never queued or awaited on the turn path.

@@ -30,6 +30,14 @@ READ_TIMEOUT = 3.0
 # reranked search time out and the plugin injected nothing at all.
 SLOW_READ_TIMEOUT = 10.0
 WRITE_TIMEOUT = 10.0
+# Budget for establishing the TCP/TLS connection, spent BEFORE any of the
+# budgets above. ``requests`` applies a scalar timeout to the connect phase
+# and the read phase separately, so a scalar 3.0 is really "up to 3 s to
+# connect, then up to 3 s to read" — every call below therefore passes the
+# explicit ``(connect, read)`` tuple, which is what the documented budget
+# actually costs. 1.5 s is generous for a TLS handshake and short enough that
+# an unreachable host fails fast.
+CONNECT_TIMEOUT = 1.5
 
 MAX_QUERY_CHARS = 2000
 MIN_LIMIT = 1
@@ -137,10 +145,8 @@ class RecallClient:
                 f"{self.base_url}{SEARCH_PATH}",
                 headers=self._headers(),
                 params=params,
-                timeout=float(timeout) if timeout else READ_TIMEOUT,
+                timeout=(CONNECT_TIMEOUT, float(timeout) if timeout else READ_TIMEOUT),
             )
-        except RecallError:
-            raise
         except Exception as exc:
             raise RecallError(f"Recall search transport failure: {type(exc).__name__}") from exc
 
@@ -189,7 +195,10 @@ class RecallClient:
         for attempt in (0, 1):
             try:
                 response = requests.post(
-                    url, headers=self._headers(), json=body, timeout=WRITE_TIMEOUT
+                    url,
+                    headers=self._headers(),
+                    json=body,
+                    timeout=(CONNECT_TIMEOUT, WRITE_TIMEOUT),
                 )
             except Exception as exc:
                 last_error = RecallError(
@@ -213,4 +222,5 @@ class RecallClient:
             memory_id = payload.get("memory_id") or payload.get("id") or ""
             return str(memory_id) if memory_id else ""
 
-        raise last_error or RecallError("Recall store failed")
+        # No trailing raise: the loop cannot fall through. Attempt 1 either
+        # returns, or raises — `continue` is only ever taken on attempt 0.

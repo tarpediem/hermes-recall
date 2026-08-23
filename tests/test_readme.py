@@ -91,13 +91,19 @@ def test_readme_documents_how_the_live_integration_test_is_enabled():
         assert var in live_source
 
 
-def test_readme_documents_both_read_budgets():
-    from recall._client import READ_TIMEOUT, SLOW_READ_TIMEOUT
+def test_readme_documents_every_read_budget_honestly():
+    """A scalar timeout is a read budget only — the connect budget is spent
+    on top of it, and Hermes caps the whole prefetch on its own side."""
+    from recall._client import CONNECT_TIMEOUT, READ_TIMEOUT, SLOW_READ_TIMEOUT
 
     text = README.read_text()
 
-    assert f"{READ_TIMEOUT:.0f} s budget" in text
+    assert f"{READ_TIMEOUT:.0f} s read budget" in text
+    assert f"{CONNECT_TIMEOUT} s connect budget" in text
     assert f"{SLOW_READ_TIMEOUT:.0f} s budget" in text
+    assert "caps the whole prefetch at 8 s" in text
+    # The claim that was never true of a scalar requests timeout.
+    assert "hard 3 s budget" not in text
 
 
 def test_readme_has_no_python_dependencies():

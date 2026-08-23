@@ -27,7 +27,13 @@ from typing import Any
 import pytest
 import requests
 from recall import _client
-from recall._client import READ_TIMEOUT, SLOW_READ_TIMEOUT, WRITE_TIMEOUT, RecallClient
+from recall._client import (
+    CONNECT_TIMEOUT,
+    READ_TIMEOUT,
+    SLOW_READ_TIMEOUT,
+    WRITE_TIMEOUT,
+    RecallClient,
+)
 from recall._provider import RecallMemoryProvider
 
 # A key shaped like a real one. It must never appear in a log record or in
@@ -559,7 +565,7 @@ def test_the_cold_turn_path_sends_no_rerank_and_the_turn_budget(tmp_path, monkey
     assert fake.calls, "prefetch never reached the transport"
     for verb, _url, kwargs in fake.calls:
         assert verb == "get"
-        assert kwargs["timeout"] == READ_TIMEOUT
+        assert kwargs["timeout"] == (CONNECT_TIMEOUT, READ_TIMEOUT)
         assert kwargs["params"]["rerank"] == "false"
     assert_no_key(caplog)
 
@@ -576,7 +582,7 @@ def test_the_background_warm_up_gets_the_off_turn_timeout(tmp_path, monkeypatch,
 
     assert fake.calls, "the warm-up never reached the transport"
     for _verb, _url, kwargs in fake.calls:
-        assert kwargs["timeout"] == SLOW_READ_TIMEOUT
+        assert kwargs["timeout"] == (CONNECT_TIMEOUT, SLOW_READ_TIMEOUT)
         # The configured value survives here — only the cold path overrides it.
         assert kwargs["params"]["rerank"] == "true"
     assert SLOW_READ_TIMEOUT > READ_TIMEOUT
@@ -591,7 +597,8 @@ def test_the_search_tool_gets_the_off_turn_timeout(tmp_path, monkeypatch, caplog
     provider.handle_tool_call("recall_search", {"query": QUERY})
     provider.shutdown()
 
-    assert [kwargs["timeout"] for _v, _u, kwargs in fake.calls] == [SLOW_READ_TIMEOUT]
+    off_turn = (CONNECT_TIMEOUT, SLOW_READ_TIMEOUT)
+    assert [kwargs["timeout"] for _v, _u, kwargs in fake.calls] == [off_turn]
     assert [kwargs["params"]["rerank"] for _v, _u, kwargs in fake.calls] == ["true"]
     assert_no_key(caplog)
 
@@ -607,7 +614,7 @@ def test_the_write_path_passes_the_write_timeout(tmp_path, monkeypatch, caplog):
     posts = [c for c in fake.calls if c[0] == "post"]
     assert len(posts) == 2, "store retries exactly once on a transport failure"
     for _verb, _url, kwargs in posts:
-        assert kwargs["timeout"] == WRITE_TIMEOUT
+        assert kwargs["timeout"] == (CONNECT_TIMEOUT, WRITE_TIMEOUT)
     assert_no_key(caplog)
 
 
@@ -721,8 +728,9 @@ def test_the_two_read_paths_differ_only_where_they_must(tmp_path, monkeypatch, c
     provider.shutdown()
 
     cold, warm = fake.calls[0][2], fake.calls[1][2]
-    assert (cold["params"]["rerank"], cold["timeout"]) == ("false", READ_TIMEOUT)
-    assert (warm["params"]["rerank"], warm["timeout"]) == ("true", SLOW_READ_TIMEOUT)
+    assert (cold["params"]["rerank"], cold["timeout"]) == ("false", (CONNECT_TIMEOUT, READ_TIMEOUT))
+    off_turn = (CONNECT_TIMEOUT, SLOW_READ_TIMEOUT)
+    assert (warm["params"]["rerank"], warm["timeout"]) == ("true", off_turn)
     # Everything else is identical: only the two knobs move.
     assert cold["params"]["query"] == warm["params"]["query"]
     assert cold["params"]["limit"] == warm["params"]["limit"]

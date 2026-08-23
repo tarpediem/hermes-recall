@@ -59,7 +59,7 @@ def test_store_posts_the_expected_payload(monkeypatch, client):
         "scope": "project",
         "tags": ["hermes", "session:s1"],
     }
-    assert kwargs["timeout"] == _client.WRITE_TIMEOUT
+    assert kwargs["timeout"] == (_client.CONNECT_TIMEOUT, _client.WRITE_TIMEOUT)
     assert kwargs["headers"]["User-Agent"] == _client.USER_AGENT
     assert memory_id == "abc123"
 

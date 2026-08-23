@@ -168,6 +168,14 @@ API key is never logged.
   embedding, an entity extraction and a conflict-detection pass server-side.
   `min_chars`, `max_chars`, `sync_turns` and `session_summary` are the
   throttles — turn them down before turning writes off entirely.
+- **`rerank` costs latency, and where it is paid matters.** A reranked search
+  measures ~4.5 s against the public instance (cross-encoder round-trip on the
+  ML API GPU) versus ~0.3 s without. The background warm-up and the
+  `recall_search` tool are given a 10 s budget and absorb it; the synchronous
+  turn-path fallback keeps a hard 3 s budget and simply injects nothing when it
+  cannot finish. In practice that means the very first turn of a session may
+  get no block while `rerank` is on — set `rerank: false` if you would rather
+  have sub-second injection from turn one than the better ranking.
 - Background writes run on daemon threads, capped at 16 concurrently in
   flight; beyond that a wedged Recall causes writes to be dropped (logged),
   never queued or awaited on the turn path.
@@ -185,6 +193,23 @@ The unit suite never touches the network — `requests` is monkeypatched at
 `recall._client.requests`. `HERMES_AGENT_SRC` overrides where the Hermes agent
 source lives (default `~/.hermes/hermes-agent`), which the test harness needs
 on `sys.path` to import `agent.memory_provider` and `plugins.memory.config_schema`.
+
+`tests/test_fail_open.py` is the transport-level sweep: it breaks `requests`
+itself — connection errors, timeouts, 401/403/500/502, non-JSON bodies,
+wrong-shaped payloads — and asserts that every public hook still returns its
+neutral value and that the API key never reaches a log record.
+
+The live integration test (`tests/test_integration_live.py`) is the one
+exception to "no network", and it runs only when `RECALL_TEST_API_KEY` is set:
+
+```bash
+RECALL_TEST_API_KEY=rag_… .venv/bin/python -m pytest tests/test_integration_live.py -v
+```
+
+`RECALL_TEST_BASE_URL` points it at another instance (default the public one).
+It writes one memory per run, tagged **`hermes-recall-live-test`** plus
+`marker:<id>`; nothing is ever deleted (the plugin has no delete path), so
+purge that tag when the test memories pile up.
 
 ## License
 

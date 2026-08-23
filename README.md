@@ -247,9 +247,12 @@ API key is never logged.
   budget. Background warm-ups keep trying (they are off the turn path, so
   their latency is nobody's wait) and the first one that succeeds clears the
   pause immediately. It is logged once, when it starts, not once per turn.
-- Background writes run on daemon threads, capped at 16 concurrently in
-  flight; beyond that a wedged Recall causes writes to be dropped (logged),
-  never queued or awaited on the turn path.
+- Background work runs on daemon threads, capped at 16 concurrently in
+  flight; beyond that a wedged Recall causes work to be dropped, never queued
+  or awaited on the turn path. The log line names what was dropped — a
+  `prefetch warm-up` (costs one turn its memory block) or a `write` (loses a
+  memory for good) — at most once per 30 s per kind, so a wedged instance
+  cannot flood the log.
 
 ## Development
 

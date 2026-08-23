@@ -295,9 +295,8 @@ def test_a_warm_hit_reports_its_count_without_a_second_lookup(tmp_path):
 
     provider.queue_prefetch("a genuine question about something", session_id="s1")
     provider.shutdown()
-    # Anything published outside the cache entry is not part of the contract.
-    provider._prefetch_counts.clear()
 
+    # The count travels inside the cache entry — there is no second registry.
     block = provider.prefetch("a genuine question about something", session_id="s1")
 
     assert block.startswith("Relevant memories (Recall):")

@@ -150,3 +150,10 @@ def test_readme_documents_the_read_backoff():
     assert f"{READ_BACKOFF_THRESHOLD} consecutive read" in text
     assert f"{READ_BACKOFF_SECONDS:.0f} s" in text
     assert "warm-ups keep" in text
+
+
+def test_readme_documents_what_a_dropped_task_costs():
+    text = README.read_text()
+
+    assert "prefetch warm-up" in text
+    assert "once per 30 s per kind" in text

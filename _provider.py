@@ -66,6 +66,9 @@ SNIPPET_CHARS = 300
 # is wedged (each write can hang for WRITE_TIMEOUT); beyond it, writes are
 # dropped with a warning rather than queued or awaited.
 MAX_LIVE_THREADS = 16
+# A wedged Recall drops work on every turn. One line per 30 s per kind is a
+# signal; one line per drop is a flood that buries everything else in the log.
+DROP_WARNING_INTERVAL_SECONDS = 30.0
 SHUTDOWN_BUDGET_SECONDS = 5.0
 SESSION_MIN_TURNS = 2
 # Consecutive transport-level read failures before the synchronous turn-path
@@ -321,9 +324,6 @@ class RecallMemoryProvider(MemoryProvider):
         # dict assignment so a concurrent prefetch() can never observe a block
         # without its count (see _search_and_cache).
         self._prefetch_cache: dict[str, tuple[str, int]] = {}
-        # Declared by the provider skeleton; superseded by the tuple above and
-        # kept only so nothing that touches the attribute breaks.
-        self._prefetch_counts: dict[str, int] = {}
         self._last_count: int = 0
         # Consecutive transport-level read failures, and the monotonic instant
         # the turn-path pause they armed expires at (0.0 = not paused).
@@ -335,6 +335,9 @@ class RecallMemoryProvider(MemoryProvider):
         # turn path. Joins now happen only at a session boundary or shutdown.
         self._threads: list[threading.Thread] = []
         self._threads_lock = threading.Lock()
+        # Last time a drop of each kind ("prefetch warm-up" / "write") was
+        # logged, monotonic. Guarded by _threads_lock, which _spawn holds.
+        self._drop_warned_at: dict[str, float] = {}
         # Bumped whenever the prefetch cache is flushed wholesale. A background
         # search carries the generation it was spawned under and drops its
         # result if the cache has been flushed since — otherwise an in-flight
@@ -382,7 +385,6 @@ class RecallMemoryProvider(MemoryProvider):
             self._auth_warned = False
             self._reset_read_backoff()
             self._prefetch_cache.clear()
-            self._prefetch_counts.clear()
             self._cache_generation += 1
             self._last_count = 0
             # Forget finished threads; deliberately do NOT join live ones. A
@@ -399,7 +401,10 @@ class RecallMemoryProvider(MemoryProvider):
     # -- tools -------------------------------------------------------------
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        return [SEARCH_TOOL_SCHEMA, STORE_TOOL_SCHEMA]
+        """Deep copies: these dicts are handed to the tool registry, and a
+        caller that annotates one in place would otherwise mutate the module
+        constant for every provider instance in the process."""
+        return copy.deepcopy([SEARCH_TOOL_SCHEMA, STORE_TOOL_SCHEMA])
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
         try:
@@ -635,11 +640,19 @@ class RecallMemoryProvider(MemoryProvider):
             if len(self._threads) >= MAX_LIVE_THREADS:
                 # A wedged Recall must not grow the pool without bound. Drop the
                 # work rather than block: memory is best-effort by design.
-                logger.warning(
-                    "Recall %s dropped: %d background writes already in flight",
-                    name,
-                    len(self._threads),
-                )
+                # A dropped warm-up costs one turn its memory block; a dropped
+                # write loses a memory for good — the log has to say which.
+                kind = "prefetch warm-up" if name == "prefetch" else "write"
+                now = time.monotonic()
+                last = self._drop_warned_at.get(kind)
+                if last is None or now - last >= DROP_WARNING_INTERVAL_SECONDS:
+                    self._drop_warned_at[kind] = now
+                    logger.warning(
+                        "Recall dropped a %s (%s): %d background tasks already in flight",
+                        kind,
+                        name,
+                        len(self._threads),
+                    )
                 return
             self._threads.append(thread)
             # Started under the lock: a not-yet-started thread reads as
@@ -931,11 +944,13 @@ class RecallMemoryProvider(MemoryProvider):
             if rewound:
                 key = new_session_id or self._session_id
                 self._prefetch_cache.pop(key, None)
-                self._prefetch_counts.pop(key, None)
+                # The rewound-away turn may have a warm-up in flight. Bumping
+                # the generation makes it discard its block instead of writing
+                # it back under a key that now means something else.
+                self._cache_generation += 1
             if reset:
                 self._join_threads(SHUTDOWN_BUDGET_SECONDS)
                 self._prefetch_cache.clear()
-                self._prefetch_counts.clear()
                 self._cache_generation += 1
                 self._last_count = 0
                 self._auth_warned = False

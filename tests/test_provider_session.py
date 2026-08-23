@@ -146,7 +146,6 @@ def test_on_session_switch_with_reset_clears_the_prefetch_cache(tmp_path):
     provider.on_session_switch("s2", reset=True)
 
     assert provider._prefetch_cache == {}
-    assert provider._prefetch_counts == {}
 
 
 def test_on_session_switch_with_reset_rearms_the_auth_warning(tmp_path):

@@ -33,7 +33,7 @@ class RecordingClient(RecallClient):
             raise self.raiser
         return "mem-1"
 
-    def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None):
+    def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None, timeout=None):
         return [
             {
                 "id": "m",

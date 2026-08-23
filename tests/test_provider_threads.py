@@ -38,7 +38,7 @@ class GatedClient(RecallClient):
             self.stored.append(content)
         return "mem-1"
 
-    def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None):
+    def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None, timeout=None):
         self.entered.release()
         self.gate.wait(timeout=10.0)
         return [

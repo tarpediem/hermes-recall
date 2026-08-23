@@ -16,7 +16,7 @@ from typing import Any
 
 from agent.memory_provider import MemoryProvider
 
-from ._client import MEMORY_TYPES, RecallAuthError, RecallClient
+from ._client import MEMORY_TYPES, SLOW_READ_TIMEOUT, RecallAuthError, RecallClient
 from ._filters import (
     condense_turn,
     extract_insights,
@@ -295,21 +295,32 @@ class RecallMemoryProvider(MemoryProvider):
                 limit=limit,
                 rerank=bool(self._config.get("rerank", True)),
                 graph_boost=bool(self._config.get("graph_boost", False)),
+                # An explicit tool call is not the turn-path injection: the
+                # model asked for this one and a reranked query really takes
+                # ~4.5 s, so the 3 s turn budget would make the tool useless.
+                timeout=SLOW_READ_TIMEOUT,
             )
         except Exception as exc:
             self._log_failure("search", exc)
             return tool_error("Recall search failed")
 
-        results = [
-            {
-                "id": item.get("id", ""),
-                "type": item.get("type", "memory"),
-                "timestamp": item.get("timestamp", ""),
-                "score": item.get("score"),
-                "snippet": truncate(str(item.get("snippet") or ""), SNIPPET_CHARS),
-            }
-            for item in items
-        ]
+        results = []
+        for item in items:
+            # Same rule as the injected block: an item with no snippet is not a
+            # result. Without this, a degenerate payload makes the tool report
+            # hits the model cannot read, and `count` overstates what was found.
+            snippet = truncate(str(item.get("snippet") or "").strip(), SNIPPET_CHARS)
+            if not snippet:
+                continue
+            results.append(
+                {
+                    "id": item.get("id", ""),
+                    "type": item.get("type", "memory"),
+                    "timestamp": item.get("timestamp", ""),
+                    "score": item.get("score"),
+                    "snippet": snippet,
+                }
+            )
         return json.dumps({"count": len(results), "results": results}, ensure_ascii=False)
 
     def _tool_store(self, args: dict[str, Any]) -> str:
@@ -442,14 +453,25 @@ class RecallMemoryProvider(MemoryProvider):
 
     # -- recall ------------------------------------------------------------
 
-    def _search_and_cache(self, query: str, session_id: str, generation: int | None = None) -> str:
-        """Run one search and cache the rendered block. Returns "" on failure."""
+    def _search_and_cache(
+        self,
+        query: str,
+        session_id: str,
+        generation: int | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        """Run one search and cache the rendered block. Returns "" on failure.
+
+        ``timeout`` defaults to the client's turn-path budget; the background
+        warm-up passes the longer off-turn budget instead.
+        """
         try:
             items = self._client.search(
                 query,
                 limit=int(self._config.get("limit", 5)),
                 rerank=bool(self._config.get("rerank", True)),
                 graph_boost=bool(self._config.get("graph_boost", False)),
+                timeout=timeout,
             )
         except Exception as exc:
             self._log_failure("search", exc)
@@ -489,14 +511,20 @@ class RecallMemoryProvider(MemoryProvider):
             return ""
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        """Warm the cache in the background for the next turn."""
+        """Warm the cache in the background for the next turn.
+
+        Off the turn path, so it gets the longer budget: a reranked search
+        against a real instance takes ~4.5 s, and warming with the 3 s
+        turn-path budget meant the cache was never filled at all.
+        """
         try:
             if is_trivial_prompt(query):
                 return
             key = session_id or self._session_id
             generation = self._cache_generation
             self._spawn(
-                "prefetch", lambda: self._search_and_cache(query, key, generation)
+                "prefetch",
+                lambda: self._search_and_cache(query, key, generation, SLOW_READ_TIMEOUT),
             )
         except Exception as exc:
             self._log_failure("queue_prefetch", exc)

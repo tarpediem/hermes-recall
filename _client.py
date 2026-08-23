@@ -20,7 +20,15 @@ USER_AGENT = (
     "Chrome/128.0.0.0 Safari/537.36 hermes-recall/1.0"
 )
 
+# Budget for a search that sits on the turn path: the agent waits on it, so it
+# must give up fast and let the provider inject nothing.
 READ_TIMEOUT = 3.0
+# Budget for a search that does NOT sit on the turn path — the background
+# prefetch warm-up and the explicit `recall_search` tool. A reranked query
+# costs a cross-encoder round-trip on the ML API GPU and measures 4.3-4.6 s
+# against the public instance, so capping those at READ_TIMEOUT made every
+# reranked search time out and the plugin injected nothing at all.
+SLOW_READ_TIMEOUT = 10.0
 WRITE_TIMEOUT = 10.0
 
 MAX_QUERY_CHARS = 2000
@@ -99,12 +107,14 @@ class RecallClient:
         rerank: bool = True,
         graph_boost: bool = False,
         tags: list[str] | None = None,
+        timeout: float | None = None,
     ) -> list[dict[str, Any]]:
         """Progressive-retrieval search. Returns the raw ``items`` list.
 
         Returns ``[]`` without any HTTP call when unconfigured or the query is
         blank. Raises ``RecallAuthError`` / ``RecallError`` on failure — no
-        retry: this call sits on the turn path with a 3 s budget.
+        retry: this call sits on the turn path with a 3 s budget by default.
+        Callers that are NOT on the turn path pass ``SLOW_READ_TIMEOUT``.
         """
         if not self.api_key:
             return []
@@ -127,7 +137,7 @@ class RecallClient:
                 f"{self.base_url}{SEARCH_PATH}",
                 headers=self._headers(),
                 params=params,
-                timeout=READ_TIMEOUT,
+                timeout=float(timeout) if timeout else READ_TIMEOUT,
             )
         except RecallError:
             raise

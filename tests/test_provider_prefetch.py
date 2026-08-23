@@ -15,7 +15,7 @@ class RecordingClient(RecallClient):
         self.raiser = raiser
         self.calls = []
 
-    def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None):
+    def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None, timeout=None):
         self.calls.append(
             {
                 "query": query,

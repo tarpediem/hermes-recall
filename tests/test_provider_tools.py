@@ -20,7 +20,7 @@ class RecordingClient(RecallClient):
         self.searches = []
         self.stored = []
 
-    def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None):
+    def search(self, query, *, limit=5, rerank=True, graph_boost=False, tags=None, timeout=None):
         self.searches.append({"query": query, "limit": limit, "rerank": rerank,
                               "graph_boost": graph_boost, "tags": tags})
         if self.search_raiser is not None:

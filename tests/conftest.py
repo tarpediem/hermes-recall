@@ -1,0 +1,67 @@
+"""Test harness for the hermes-recall plugin.
+
+The repo root IS the plugin directory that Hermes clones into
+``$HERMES_HOME/plugins/recall/``, and Hermes loads it as a package named
+``recall``. Tests must import it the same way, so this conftest registers a
+synthetic ``recall`` package whose ``__path__`` is the repo root. That makes
+``import recall._client`` work through normal submodule machinery WITHOUT
+executing the root ``__init__.py`` (which pulls in the Hermes agent runtime).
+
+Tests that need the real ``__init__.py`` body — ``register(ctx)`` and the
+re-exports — ask for the ``recall_package`` fixture, which executes it.
+
+``HERMES_AGENT_SRC`` overrides where the Hermes agent source lives.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HERMES_AGENT_SRC = Path(
+    os.environ.get("HERMES_AGENT_SRC", str(Path.home() / ".hermes" / "hermes-agent"))
+)
+
+for _path in (str(REPO_ROOT), str(HERMES_AGENT_SRC)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+
+def _register_recall_namespace() -> types.ModuleType:
+    """Expose the repo root as package ``recall`` without running __init__.py."""
+    existing = sys.modules.get("recall")
+    if existing is not None:
+        return existing
+    package = types.ModuleType("recall")
+    package.__path__ = [str(REPO_ROOT)]
+    package.__package__ = "recall"
+    sys.modules["recall"] = package
+    return package
+
+
+_register_recall_namespace()
+
+
+@pytest.fixture()
+def recall_package():
+    """Execute the real root ``__init__.py`` as the package ``recall``."""
+    spec = importlib.util.spec_from_file_location(
+        "recall",
+        str(REPO_ROOT / "__init__.py"),
+        submodule_search_locations=[str(REPO_ROOT)],
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["recall"] = module
+    try:
+        spec.loader.exec_module(module)
+        yield module
+    finally:
+        sys.modules.pop("recall", None)
+        _register_recall_namespace()

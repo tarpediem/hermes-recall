@@ -568,13 +568,18 @@ class RecallMemoryProvider(MemoryProvider):
                 return self._tool_search(args or {})
             if tool_name == "recall_store":
                 return self._tool_store(args or {})
-            # The extras are read-only, so neither write switch gates them.
-            if tool_name == "recall_graph":
-                return self._tool_graph(args or {})
-            if tool_name == "who_knows":
-                return self._tool_who_knows(args or {})
-            if tool_name == "recall_stats":
-                return self._tool_stats(args or {})
+            # The extras are read-only, so neither WRITE switch gates them —
+            # but ``extra_tools`` is an authorization boundary, not a token
+            # optimisation: a name absent from it is not merely unadvertised,
+            # it is not callable. The names are public (README), so a model
+            # that guesses one must get "Unknown tool", not a live REST call.
+            if tool_name in EXTRA_TOOL_SCHEMAS and tool_name in self._enabled_extra_tools():
+                handler = {
+                    "recall_graph": self._tool_graph,
+                    "who_knows": self._tool_who_knows,
+                    "recall_stats": self._tool_stats,
+                }[tool_name]
+                return handler(args or {})
             return tool_error(f"Unknown tool: {tool_name}")
         except Exception as exc:
             self._log_failure(f"tool {tool_name}", exc)

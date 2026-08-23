@@ -338,3 +338,15 @@ def test_the_extras_never_put_the_api_key_in_an_error(monkeypatch):
         with pytest.raises(RecallError) as excinfo:
             call()
         assert secret not in str(excinfo.value)
+
+
+def test_an_explicit_zero_timeout_is_not_treated_as_unset(monkeypatch, client):
+    """``if timeout:`` silently promoted 0 to the default read budget."""
+    fake = FakeRequests(FakeResponse(200, {}))
+    monkeypatch.setattr(_client, "requests", fake)
+
+    client.graph_recall("q", timeout=0)
+    client.who_knows("t", timeout=0)
+    client.search("q", timeout=0)
+
+    assert [c[2]["timeout"] for c in fake.calls] == [(_client.CONNECT_TIMEOUT, 0.0)] * 3

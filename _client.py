@@ -146,7 +146,13 @@ class RecallClient:
                 f"{self.base_url}{path}",
                 headers=self._headers(),
                 params=params,
-                timeout=(CONNECT_TIMEOUT, float(timeout) if timeout else READ_TIMEOUT),
+                timeout=(
+                    CONNECT_TIMEOUT,
+                    # ``is not None``, not truthiness: an explicit 0 is a
+                    # caller saying "do not wait", and silently promoting it
+                    # to the default budget would ignore that.
+                    float(timeout) if timeout is not None else READ_TIMEOUT,
+                ),
             )
         except Exception as exc:
             raise RecallError(
@@ -193,7 +199,13 @@ class RecallClient:
                 f"{self.base_url}{SEARCH_PATH}",
                 headers=self._headers(),
                 params=params,
-                timeout=(CONNECT_TIMEOUT, float(timeout) if timeout else READ_TIMEOUT),
+                timeout=(
+                    CONNECT_TIMEOUT,
+                    # ``is not None``, not truthiness: an explicit 0 is a
+                    # caller saying "do not wait", and silently promoting it
+                    # to the default budget would ignore that.
+                    float(timeout) if timeout is not None else READ_TIMEOUT,
+                ),
             )
         except Exception as exc:
             raise RecallError(f"Recall search transport failure: {type(exc).__name__}") from exc

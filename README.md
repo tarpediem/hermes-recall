@@ -96,7 +96,9 @@ more are **off by default** and can be switched on per agent with the
 ```
 
 A list works too (`["recall_graph", "who_knows"]`); an unknown name is ignored
-with one warning. All three are **read-only** — they answer even when
+with one warning. `extra_tools` is a capability switch, not just a listing: a
+tool that is not enabled is not callable either — calling it by name answers
+`Unknown tool` and never reaches Recall. All three are **read-only** — they answer even when
 `writes_enabled` is off — and they run off the turn path, so they never eat
 into the turn budget.
 

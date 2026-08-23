@@ -456,9 +456,14 @@ def test_the_extras_are_exposed_only_once_opted_in(provider, provider_with_extra
 
 
 def test_the_extras_reach_the_transport_with_the_off_turn_budget(tmp_path, monkeypatch, caplog):
+    from recall._provider import recall_config_path
+
+    path = recall_config_path(str(tmp_path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"extra_tools": [c[0] for c in EXTRA_CALLS]}), encoding="utf-8")
     fake = ExplodingRequests(lambda: requests.exceptions.Timeout("read timed out"))
     monkeypatch.setattr(_client, "requests", fake)
-    provider = make_provider(tmp_path)
+    provider = make_provider(tmp_path)  # opted in, above
 
     for name, args in EXTRA_CALLS:
         provider.handle_tool_call(name, args)
@@ -468,6 +473,21 @@ def test_the_extras_reach_the_transport_with_the_off_turn_budget(tmp_path, monke
     assert [c[0] for c in fake.calls] == ["get", "get", "get"], "reads only"
     assert [kwargs["timeout"] for _v, _u, kwargs in fake.calls] == [off_turn] * 3
     assert_no_key(caplog)
+
+
+@pytest.mark.parametrize("name,args", EXTRA_CALLS, ids=[c[0] for c in EXTRA_CALLS])
+def test_a_disabled_extra_never_reaches_the_transport(name, args, tmp_path, monkeypatch, caplog):
+    """extra_tools is an authorization boundary: no config, no capability."""
+    fake = ExplodingRequests(lambda: requests.exceptions.Timeout("read timed out"))
+    monkeypatch.setattr(_client, "requests", fake)
+    provider = make_provider(tmp_path)
+
+    raw = provider.handle_tool_call(name, args)
+    provider.shutdown()
+
+    assert json.loads(raw)["error"] == f"Unknown tool: {name}"
+    assert fake.calls == []
+    assert_no_key(caplog, raw)
 
 
 def test_handle_tool_call_unknown_tool_returns_json_error(provider, fault, caplog):

@@ -300,6 +300,70 @@ def test_recall_stats_degrades_without_the_graph_numbers(tmp_path, write_recall_
     assert payload == {"total_memories": 12}
 
 
+# -- extra_tools gates the CAPABILITY, not just the schema -------------------
+
+
+@pytest.mark.parametrize(
+    "name,args",
+    [
+        ("recall_graph", {"query": "recall"}),
+        ("who_knows", {"topic": "neo4j"}),
+        ("recall_stats", {}),
+    ],
+)
+def test_a_disabled_extra_is_an_unknown_tool_and_makes_no_call(name, args, tmp_path):
+    """The names are public (README); a guessed call must not reach Recall."""
+    client = RecordingClient()
+    provider = _provider(tmp_path, client)
+
+    payload = json.loads(provider.handle_tool_call(name, args))
+
+    assert payload["error"] == f"Unknown tool: {name}"
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "name,args",
+    [
+        ("recall_graph", {"query": "recall"}),
+        ("who_knows", {"topic": "neo4j"}),
+        ("recall_stats", {}),
+    ],
+)
+def test_only_the_enabled_extra_is_callable(name, args, tmp_path, write_recall_config):
+    """Enabling one extra must not enable the other two."""
+    client = RecordingClient()
+    provider = _provider(
+        tmp_path, client, config={"extra_tools": [name]}, write_config=write_recall_config
+    )
+
+    assert "error" not in json.loads(provider.handle_tool_call(name, args))
+    others = [n for n in ALL_EXTRAS if n != name]
+    for other in others:
+        payload = json.loads(
+            provider.handle_tool_call(other, {"query": "q", "topic": "t"})
+        )
+        assert payload["error"] == f"Unknown tool: {other}"
+    assert [call[0] for call in client.calls] == [
+        {"recall_graph": "graph_recall", "who_knows": "who_knows", "recall_stats": "stats"}[name]
+    ]
+
+
+def test_an_unknown_extra_in_the_config_does_not_become_callable(tmp_path, write_recall_config):
+    client = RecordingClient()
+    provider = _provider(
+        tmp_path,
+        client,
+        config={"extra_tools": ["recall_delete_everything"]},
+        write_config=write_recall_config,
+    )
+
+    payload = json.loads(provider.handle_tool_call("recall_delete_everything", {}))
+
+    assert "Unknown tool" in payload["error"]
+    assert client.calls == []
+
+
 # -- read-only: never gated by the write switches ----------------------------
 
 

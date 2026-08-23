@@ -748,8 +748,12 @@ class RecallMemoryProvider(MemoryProvider):
 
         Off the turn path, so it keeps the configured ``rerank`` and gets the
         longer budget: a reranked search against a real instance takes ~4.5 s,
-        and warming with the 3 s turn-path budget meant the cache was never
-        filled at all.
+        and warming with the turn-path budget meant the cache was never filled
+        at all.
+
+        Deliberately NOT suppressed by the read backoff: nobody waits on a
+        warm-up, so probing costs the user nothing, and it is what discovers
+        that Recall is reachable again (a success clears the pause at once).
         """
         try:
             if is_trivial_prompt(query):
@@ -964,9 +968,13 @@ class RecallMemoryProvider(MemoryProvider):
         what Recall judged worth keeping.
 
         (a) background: condense the discarded messages and store them with
-            the ``pre-compress`` tag.
+            the ``pre-compress`` tag — under ``session_summary``, which is the
+            key that governs this kind of synthesis, and under the write
+            switches like every other store.
         (b) synchronous: return an insight block that Hermes feeds into the
-            compression summary prompt.
+            compression summary prompt. It is a READ of messages already in
+            context and stores nothing, so it is returned regardless of the
+            write switches.
         """
         try:
             # (a) is the same synthesis on_session_end writes, so the same key

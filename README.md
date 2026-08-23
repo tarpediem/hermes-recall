@@ -203,8 +203,9 @@ API key is never logged.
 - **No deletion.** `remove` on the built-in memory tool is a no-op here;
   mirrored entries are never deleted from Recall.
 - **Fail open, always.** Every failure degrades to "no memory this turn",
-  never to a broken turn. A rejected API key is logged **once per session**,
-  not once per turn.
+  never to a broken turn. A rejected API key is logged at **error** level
+  **once per session** — not once per turn — because it means memory is off
+  for that whole session.
 
 ## Operator notes
 

@@ -357,6 +357,62 @@ class RecallMemoryProvider(MemoryProvider):
         except Exception as exc:
             self._log_failure("sync_turn", exc)
 
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Mirror a built-in memory tool write into Recall.
+
+        ``metadata`` is a defaulted keyword, so Hermes 0.19.1's
+        three-positional-argument call site works unchanged.
+        """
+        try:
+            if action not in {"add", "replace"}:
+                return  # 'remove' is a documented no-op: nothing is deleted
+            text = (content or "").strip()
+            if not text:
+                return
+            memory_type = "preference" if target == "user" else "context"
+            label = "User profile" if target == "user" else "Agent memory"
+            body = truncate(
+                f"[{label}] {text}", int(self._config.get("max_chars", 4000))
+            )
+            self._store_async(
+                "memwrite",
+                body,
+                memory_type=memory_type,
+                tags=self._tags("builtin-mirror"),
+            )
+        except Exception as exc:
+            self._log_failure("on_memory_write", exc)
+
+    def on_delegation(
+        self,
+        task: str,
+        result: str,
+        *,
+        child_session_id: str = "",
+        **kwargs: Any,
+    ) -> None:
+        """Store what was delegated and what came back, as one memory."""
+        try:
+            task_text = (task or "").strip()
+            result_text = (result or "").strip()
+            if not task_text or not result_text:
+                return
+            body = truncate(
+                f"Delegated task: {task_text}\nResult: {result_text}",
+                int(self._config.get("max_chars", 4000)),
+            )
+            self._store_async(
+                "delegation", body, memory_type="context", tags=self._tags("delegation")
+            )
+        except Exception as exc:
+            self._log_failure("on_delegation", exc)
+
     # -- shutdown ----------------------------------------------------------
 
     def shutdown(self) -> None:

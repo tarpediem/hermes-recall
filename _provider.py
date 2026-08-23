@@ -17,7 +17,13 @@ from typing import Any
 from agent.memory_provider import MemoryProvider
 
 from ._client import RecallAuthError, RecallClient
-from ._filters import condense_turn, is_trivial_prompt, is_worth_storing, truncate
+from ._filters import (
+    condense_turn,
+    is_trivial_prompt,
+    is_worth_storing,
+    summarize_session,
+    truncate,
+)
 
 try:  # Present from Hermes 0.20; absent on 0.19.1.
     from agent.memory_provider import RecallStatus
@@ -51,6 +57,7 @@ SNIPPET_CHARS = 300
 # dropped with a warning rather than queued or awaited.
 MAX_LIVE_THREADS = 16
 SHUTDOWN_BUDGET_SECONDS = 5.0
+SESSION_MIN_TURNS = 2
 PROVIDER_LABEL = "Recall"
 GLYPH = "🧠"
 
@@ -467,6 +474,61 @@ class RecallMemoryProvider(MemoryProvider):
             )
         except Exception as exc:
             self._log_failure("on_delegation", exc)
+
+    # -- session lifecycle -------------------------------------------------
+
+    def on_session_end(self, messages: list[dict[str, Any]]) -> None:
+        """Write ONE synthesis of the session — not a dump of every turn."""
+        try:
+            if not self._writes_enabled:
+                return
+            if not bool(self._config.get("session_summary", True)):
+                return
+            summary = summarize_session(
+                messages,
+                max_chars=int(self._config.get("max_chars", 4000)),
+                min_turns=SESSION_MIN_TURNS,
+            )
+            if summary is None:
+                return
+            content, memory_type = summary
+            self._store_async(
+                "summary", content, memory_type=memory_type, tags=self._tags("session-summary")
+            )
+        except Exception as exc:
+            self._log_failure("on_session_end", exc)
+
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        rewound: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """Re-scope cached state so writes land in the right session's record.
+
+        A plain switch (a subagent handoff) stays O(1). ``reset`` is a real
+        session boundary, so it is the one place besides ``shutdown`` where
+        joining in-flight writes is allowed — the old session's memories are
+        flushed before its state is dropped.
+        """
+        try:
+            if rewound:
+                key = new_session_id or self._session_id
+                self._prefetch_cache.pop(key, None)
+                self._prefetch_counts.pop(key, None)
+            if reset:
+                self._join_threads(SHUTDOWN_BUDGET_SECONDS)
+                self._prefetch_cache.clear()
+                self._prefetch_counts.clear()
+                self._last_count = 0
+                self._auth_warned = False
+            if new_session_id:
+                self._session_id = new_session_id
+        except Exception as exc:
+            self._log_failure("on_session_switch", exc)
 
     # -- shutdown ----------------------------------------------------------
 

@@ -166,8 +166,8 @@ def test_recall_store_missing_content_is_a_tool_error(tmp_path):
     assert "error" in payload
 
 
-def test_recall_store_truncates_at_max_chars(tmp_path):
-    (tmp_path / "recall.json").write_text(json.dumps({"max_chars": 100}))
+def test_recall_store_truncates_at_max_chars(tmp_path, write_recall_config):
+    write_recall_config(tmp_path, {"max_chars": 100})
     client = RecordingClient()
     provider = _provider(client, tmp_path)
 

@@ -1,7 +1,5 @@
 """Mirroring the built-in memory tool, and observing delegations."""
 
-import json
-
 from recall._client import RecallClient, RecallError
 from recall._provider import RecallMemoryProvider
 
@@ -141,8 +139,8 @@ def test_on_delegation_stores_task_and_result(tmp_path):
     assert "delegation" in record["tags"]
 
 
-def test_on_delegation_truncates_at_max_chars(tmp_path):
-    (tmp_path / "recall.json").write_text(json.dumps({"max_chars": 150}))
+def test_on_delegation_truncates_at_max_chars(tmp_path, write_recall_config):
+    write_recall_config(tmp_path, {"max_chars": 150})
     client = RecordingClient()
     provider = _provider(client, tmp_path)
 

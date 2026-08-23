@@ -45,32 +45,7 @@ def _register_recall_namespace() -> types.ModuleType:
     return package
 
 
-def _neutralize_root_package_collection() -> None:
-    """Stop pytest from executing the repo-root ``__init__.py`` as a package.
-
-    The repo root IS the plugin package, so once ``__init__.py`` exists pytest
-    collects the rootdir as a ``Package`` node whose ``setup()`` imports that
-    file under the top-level module name ``__init__`` — where the relative
-    imports (``from ._client import …``) have no parent package, so every test
-    errors at setup. It would also drag the Hermes agent runtime into every
-    session, which is exactly what this harness avoids.
-
-    Seeding ``sys.modules["__init__"]`` with a stub carrying the right
-    ``__file__`` makes pytest's ``import_path`` return the cached module and
-    skip execution (and satisfies its ImportPathMismatch check). The real
-    ``__init__.py`` is executed on demand, under its real name, by the
-    ``recall_package`` fixture below.
-    """
-    if "__init__" in sys.modules:
-        return
-    stub = types.ModuleType("__init__")
-    stub.__file__ = str(REPO_ROOT / "__init__.py")
-    stub.__path__ = [str(REPO_ROOT)]
-    sys.modules["__init__"] = stub
-
-
 _register_recall_namespace()
-_neutralize_root_package_collection()
 
 
 @pytest.fixture(autouse=True)
@@ -104,3 +79,25 @@ def recall_package():
     finally:
         sys.modules.pop("recall", None)
         _register_recall_namespace()
+
+
+@pytest.fixture()
+def write_recall_config():
+    """Write a config file where the provider (and the dashboard) expects it.
+
+    Centralised so the ``$HERMES_HOME/recall/config.json`` path — which is a
+    contract with ``hermes_cli/web_server.py::_flat_json_path``, not a free
+    choice — is spelled out in exactly one place across the suite.
+    """
+    import json
+
+    from recall._provider import recall_config_path
+
+    def _write(hermes_home, payload):
+        path = recall_config_path(str(hermes_home))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    return _write

@@ -1,11 +1,9 @@
 name: recall
 version: 1.0.0
 description: "Recall — persistent cross-session memory over the Recall REST API (search before each turn, filtered writes after, session synthesis at the end)."
+requires_env:
+  - RECALL_API_KEY
 hooks:
-  - prefetch
-  - queue_prefetch
-  - recall_status
-  - sync_turn
   - on_session_end
   - on_session_switch
   - on_pre_compress

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 
@@ -93,8 +92,8 @@ def test_on_session_end_skips_below_two_useful_turns(tmp_path):
     assert client.stored == []
 
 
-def test_on_session_end_skips_when_session_summary_disabled(tmp_path):
-    (tmp_path / "recall.json").write_text(json.dumps({"session_summary": False}))
+def test_on_session_end_skips_when_session_summary_disabled(tmp_path, write_recall_config):
+    write_recall_config(tmp_path, {"session_summary": False})
     client = RecordingClient()
     provider = _provider(client, tmp_path)
 

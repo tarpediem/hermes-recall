@@ -51,7 +51,8 @@ except Exception:  # pragma: no cover - bare test environment
 
 logger = logging.getLogger(__name__)
 
-CONFIG_FILENAME = "recall.json"
+CONFIG_DIRNAME = "recall"
+CONFIG_FILENAME = "config.json"
 SNIPPET_CHARS = 300
 # Hard cap on concurrently live background threads. Reached only when Recall
 # is wedged (each write can hang for WRITE_TIMEOUT); beyond it, writes are
@@ -143,11 +144,24 @@ STORE_TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
+def recall_config_path(hermes_home: str) -> Path:
+    """``$HERMES_HOME/recall/config.json`` — where the dashboard panel writes.
+
+    ``config_schema.py`` declares the default ``STORAGE_FLAT_JSON`` backend,
+    whose path contract is ``get_hermes_home() / <provider name> /
+    "config.json"`` (``hermes_cli/web_server.py::_flat_json_path``). The
+    provider must read exactly that file: any other location and every
+    non-secret field saved from the panel would be written somewhere nothing
+    ever loads. Same convention as the shipped hindsight provider.
+    """
+    return Path(hermes_home) / CONFIG_DIRNAME / CONFIG_FILENAME
+
+
 def load_recall_config(hermes_home: str) -> dict[str, Any]:
-    """Merge ``$HERMES_HOME/recall.json`` and the env over the defaults."""
+    """Merge ``$HERMES_HOME/recall/config.json`` and the env over the defaults."""
     config = dict(DEFAULTS)
     try:
-        path = Path(hermes_home) / CONFIG_FILENAME
+        path = recall_config_path(hermes_home)
         if path.is_file():
             raw = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
@@ -340,7 +354,7 @@ class RecallMemoryProvider(MemoryProvider):
     def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
         try:
             payload = {k: v for k, v in (values or {}).items() if k in DEFAULTS}
-            path = Path(hermes_home) / CONFIG_FILENAME
+            path = recall_config_path(hermes_home)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         except Exception as exc:

@@ -49,7 +49,7 @@ class RecallClient:
     """Minimal REST client for Recall.
 
     ``api_key`` and ``base_url`` are public attributes so the provider can
-    apply a ``recall.json`` override after construction.
+    apply a ``recall/config.json`` override after construction.
     """
 
     def __init__(self, api_key: str = "", base_url: str = "") -> None:

@@ -4,7 +4,12 @@ import json
 
 import pytest
 from recall._client import RecallAuthError, RecallClient, RecallError
-from recall._provider import DEFAULTS, RecallMemoryProvider, load_recall_config
+from recall._provider import (
+    DEFAULTS,
+    RecallMemoryProvider,
+    load_recall_config,
+    recall_config_path,
+)
 
 
 @pytest.fixture()
@@ -65,8 +70,8 @@ def test_load_recall_config_returns_defaults_when_no_file(tmp_path):
     assert config["base_url"] == DEFAULTS["base_url"]
 
 
-def test_load_recall_config_merges_the_json_file(tmp_path):
-    (tmp_path / "recall.json").write_text(json.dumps({"limit": 9, "sync_turns": False}))
+def test_load_recall_config_merges_the_json_file(tmp_path, write_recall_config):
+    write_recall_config(tmp_path, {"limit": 9, "sync_turns": False})
 
     config = load_recall_config(str(tmp_path))
 
@@ -75,14 +80,14 @@ def test_load_recall_config_merges_the_json_file(tmp_path):
     assert config["max_chars"] == 4000  # untouched default
 
 
-def test_load_recall_config_survives_a_corrupt_file(tmp_path):
-    (tmp_path / "recall.json").write_text("{ not json")
+def test_load_recall_config_survives_a_corrupt_file(tmp_path, write_recall_config):
+    write_recall_config(tmp_path, "{ not json")
 
     assert load_recall_config(str(tmp_path))["limit"] == 5
 
 
-def test_env_base_url_wins_over_the_file(tmp_path, monkeypatch):
-    (tmp_path / "recall.json").write_text(json.dumps({"base_url": "https://from-file"}))
+def test_env_base_url_wins_over_the_file(tmp_path, monkeypatch, write_recall_config):
+    write_recall_config(tmp_path, {"base_url": "https://from-file"})
     monkeypatch.setenv("RECALL_BASE_URL", "https://from-env")
 
     assert load_recall_config(str(tmp_path))["base_url"] == "https://from-env"
@@ -111,8 +116,10 @@ def test_initialize_disables_writes_for_non_primary_contexts(provider, tmp_path)
         assert provider._writes_enabled is False, context
 
 
-def test_initialize_applies_the_configured_base_url_to_the_client(provider, tmp_path):
-    (tmp_path / "recall.json").write_text(json.dumps({"base_url": "https://lan.example/"}))
+def test_initialize_applies_the_configured_base_url_to_the_client(
+    provider, tmp_path, write_recall_config
+):
+    write_recall_config(tmp_path, {"base_url": "https://lan.example/"})
 
     provider.initialize("s", hermes_home=str(tmp_path))
 
@@ -141,7 +148,9 @@ def test_tags_include_session_platform_and_agent(provider, tmp_path):
 def test_save_config_writes_only_non_secret_values(provider, tmp_path):
     provider.save_config({"limit": 3, "api_key": "rag_leak", "sync_turns": False}, str(tmp_path))
 
-    written = json.loads((tmp_path / "recall.json").read_text())
+    path = recall_config_path(str(tmp_path))
+    assert path == tmp_path / "recall" / "config.json"
+    written = json.loads(path.read_text())
     assert written == {"limit": 3, "sync_turns": False}
 
 

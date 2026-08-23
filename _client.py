@@ -30,6 +30,12 @@ MAX_LIMIT = 100
 SEARCH_PATH = "/api/v1/memory/search"
 STORE_PATH = "/api/v1/memories"
 
+# Canonical values accepted by the Recall StoreRequest model.
+MEMORY_TYPES = frozenset(
+    {"context", "decision", "bugfix", "architecture", "preference", "snippet"}
+)
+SCOPES = frozenset({"project", "global"})
+
 
 class RecallError(Exception):
     """Any Recall API failure. Never carries the API key."""
@@ -134,3 +140,67 @@ class RecallClient:
         if not isinstance(items, list):
             return []
         return [item for item in items if isinstance(item, dict)]
+
+    # -- write -------------------------------------------------------------
+
+    def store(
+        self,
+        content: str,
+        *,
+        memory_type: str = "context",
+        scope: str = "project",
+        tags: list[str] | None = None,
+    ) -> str:
+        """Persist one memory. Returns the created ``memory_id`` (may be "").
+
+        Always off the turn path, so it retries **once** on a transport error
+        or a 5xx. Auth failures and 4xx are terminal — retrying them only
+        doubles the load. Raises ``RecallAuthError`` / ``RecallError``.
+        """
+        if memory_type not in MEMORY_TYPES:
+            raise ValueError(f"memory_type must be one of {sorted(MEMORY_TYPES)}")
+        if scope not in SCOPES:
+            raise ValueError(f"scope must be one of {sorted(SCOPES)}")
+        if not self.api_key:
+            return ""
+        text = (content or "").strip()
+        if not text:
+            return ""
+
+        body = {
+            "content": text,
+            "memory_type": memory_type,
+            "scope": scope,
+            "tags": list(tags or []),
+        }
+        url = f"{self.base_url}{STORE_PATH}"
+
+        last_error: RecallError | None = None
+        for attempt in (0, 1):
+            try:
+                response = requests.post(
+                    url, headers=self._headers(), json=body, timeout=WRITE_TIMEOUT
+                )
+            except Exception as exc:
+                last_error = RecallError(
+                    f"Recall store transport failure: {type(exc).__name__}"
+                )
+                if attempt == 0:
+                    continue
+                raise last_error from exc
+
+            status = getattr(response, "status_code", 0)
+            if status in (401, 403):
+                raise RecallAuthError(f"Recall store rejected the API key (HTTP {status})")
+            if 500 <= status < 600:
+                last_error = RecallError(f"Recall store returned HTTP {status}")
+                if attempt == 0:
+                    continue
+                raise last_error
+            self._check(response, "store")
+
+            payload = self._json(response, "store")
+            memory_id = payload.get("memory_id") or payload.get("id") or ""
+            return str(memory_id) if memory_id else ""
+
+        raise last_error or RecallError("Recall store failed")

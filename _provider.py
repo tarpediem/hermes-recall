@@ -290,7 +290,10 @@ class RecallMemoryProvider(MemoryProvider):
                 )
                 return
             self._threads.append(thread)
-        thread.start()
+            # Started under the lock: a not-yet-started thread reads as
+            # is_alive() == False, so a concurrent prune would otherwise drop
+            # it from the registry and shutdown would never join it.
+            thread.start()
 
     # -- recall ------------------------------------------------------------
 

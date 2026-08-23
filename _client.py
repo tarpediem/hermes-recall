@@ -42,9 +42,19 @@ CONNECT_TIMEOUT = 1.5
 MAX_QUERY_CHARS = 2000
 MIN_LIMIT = 1
 MAX_LIMIT = 100
+# Ranges the Recall graph endpoints validate their query string against: a
+# value outside them is a 422, so they are clamped here rather than sent.
+MIN_DEPTH = 1
+MAX_DEPTH = 5
+MAX_GRAPH_LIMIT = 50
+MAX_WHO_KNOWS_RESULTS = 20
 
 SEARCH_PATH = "/api/v1/memory/search"
 STORE_PATH = "/api/v1/memories"
+GRAPH_RECALL_PATH = "/api/v1/graph/recall"
+GRAPH_STATS_PATH = "/api/v1/graph/stats"
+WHO_KNOWS_PATH = "/api/v1/graph/who-knows"
+SEARCH_STATS_PATH = "/api/v1/search/stats"
 
 # Canonical values accepted by the Recall StoreRequest model.
 MEMORY_TYPES = frozenset(
@@ -105,6 +115,44 @@ class RecallClient:
             raise RecallError(f"Recall {operation} returned an unexpected payload type")
         return payload
 
+    @classmethod
+    def _json_any(cls, response: Any, operation: str) -> dict[str, Any] | list[Any]:
+        """Like ``_json`` but a top-level list is legitimate too.
+
+        ``/graph/recall`` may answer either an object or a bare array of
+        entities depending on the query; anything else (a scalar, a string) is
+        still a malformed body.
+        """
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise RecallError(f"Recall {operation} returned a malformed body") from exc
+        if not isinstance(payload, (dict, list)):
+            raise RecallError(f"Recall {operation} returned an unexpected payload type")
+        return payload
+
+    @staticmethod
+    def _clamp(value: Any, low: int, high: int, fallback: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        return max(low, min(number, high))
+
+    def _get(self, path: str, params: dict[str, Any], operation: str, timeout: float | None):
+        """One GET with the shared headers, budget and error mapping."""
+        try:
+            return requests.get(
+                f"{self.base_url}{path}",
+                headers=self._headers(),
+                params=params,
+                timeout=(CONNECT_TIMEOUT, float(timeout) if timeout else READ_TIMEOUT),
+            )
+        except Exception as exc:
+            raise RecallError(
+                f"Recall {operation} transport failure: {type(exc).__name__}"
+            ) from exc
+
     # -- read --------------------------------------------------------------
 
     def search(
@@ -156,6 +204,87 @@ class RecallClient:
         if not isinstance(items, list):
             return []
         return [item for item in items if isinstance(item, dict)]
+
+    # -- read: the opt-in extras -------------------------------------------
+    #
+    # All three are off the turn path (they only ever run behind an explicitly
+    # enabled tool), read-only, and — like ``search`` — never retried: a read
+    # that failed is a read the model can simply ask for again.
+
+    def graph_recall(
+        self,
+        query: str,
+        *,
+        depth: int = 2,
+        limit: int = 10,
+        timeout: float | None = None,
+    ) -> dict[str, Any] | list[Any]:
+        """Entity-centric recall with relations. Returns the raw payload.
+
+        Returns ``{}`` without any HTTP call when unconfigured or the query is
+        blank. Raises ``RecallAuthError`` / ``RecallError`` on failure.
+        """
+        if not self.api_key:
+            return {}
+        text = (query or "").strip()
+        if not text:
+            return {}
+
+        params: dict[str, Any] = {
+            "q": text[:MAX_QUERY_CHARS],
+            "depth": self._clamp(depth, MIN_DEPTH, MAX_DEPTH, 2),
+            "include_relations": "true",
+            "limit": self._clamp(limit, MIN_LIMIT, MAX_GRAPH_LIMIT, 10),
+        }
+        response = self._get(GRAPH_RECALL_PATH, params, "graph recall", timeout)
+        self._check(response, "graph recall")
+        return self._json_any(response, "graph recall")
+
+    def who_knows(
+        self, topic: str, *, n_results: int = 5, timeout: float | None = None
+    ) -> dict[str, Any]:
+        """The people/entities most connected to ``topic``.
+
+        Returns ``{}`` without any HTTP call when unconfigured or the topic is
+        blank. Raises ``RecallAuthError`` / ``RecallError`` on failure.
+        """
+        if not self.api_key:
+            return {}
+        text = (topic or "").strip()
+        if not text:
+            return {}
+
+        params: dict[str, Any] = {
+            "topic": text[:MAX_QUERY_CHARS],
+            "n_results": self._clamp(n_results, MIN_LIMIT, MAX_WHO_KNOWS_RESULTS, 5),
+        }
+        response = self._get(WHO_KNOWS_PATH, params, "who knows", timeout)
+        self._check(response, "who knows")
+        return self._json(response, "who knows")
+
+    def stats(self, timeout: float | None = None) -> dict[str, Any]:
+        """Memory-store statistics: the ``/search/stats`` payload, plus the
+        graph numbers under ``"graph"`` when that second call succeeds.
+
+        The graph is a separate service (Neo4j) and is allowed to be down:
+        stats must degrade to the memory numbers alone, never fail because of
+        it. Returns ``{}`` without any HTTP call when unconfigured. Raises
+        ``RecallAuthError`` / ``RecallError`` only if the memory stats fail.
+        """
+        if not self.api_key:
+            return {}
+
+        response = self._get(SEARCH_STATS_PATH, {"scope": "all"}, "stats", timeout)
+        self._check(response, "stats")
+        payload = dict(self._json(response, "stats"))
+
+        try:
+            graph_response = self._get(GRAPH_STATS_PATH, {}, "graph stats", timeout)
+            self._check(graph_response, "graph stats")
+            payload["graph"] = self._json(graph_response, "graph stats")
+        except RecallError:
+            pass  # documented degradation: memory numbers without the graph
+        return payload
 
     # -- write -------------------------------------------------------------
 

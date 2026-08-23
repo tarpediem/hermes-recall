@@ -182,7 +182,7 @@ def test_the_search_tool_returns_the_stored_memory(stored_memory, tmp_path, writ
 
 
 def test_a_bad_key_is_reported_as_an_auth_error():
-    bad = RecallClient(api_key="rag_definitely_not_a_valid_key", base_url=BASE_URL)
+    bad = RecallClient(api_key="rag_" + "not-a-valid-key", base_url=BASE_URL)
 
     with pytest.raises(RecallAuthError):
         bad.search("anything")

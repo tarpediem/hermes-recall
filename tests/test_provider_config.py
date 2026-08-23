@@ -177,3 +177,55 @@ def test_other_failures_are_logged_every_time(provider, tmp_path, caplog):
 def test_system_prompt_block_mentions_recall(provider, tmp_path):
     provider.initialize("s", hermes_home=str(tmp_path))
     assert "Recall" in provider.system_prompt_block()
+
+
+# -- save_config merges, never truncates -------------------------------------
+
+
+def test_save_config_merges_into_an_existing_file(provider, tmp_path, write_recall_config):
+    """Hermes' own writer reads-modifies-writes; a partial save must not wipe
+    the keys it did not carry (dashboard setup submits a subset)."""
+    write_recall_config(tmp_path, {"limit": 9, "min_chars": 120, "graph_boost": True})
+
+    provider.save_config({"limit": 3}, str(tmp_path))
+
+    written = json.loads(recall_config_path(str(tmp_path)).read_text())
+    assert written == {"limit": 3, "min_chars": 120, "graph_boost": True}
+
+
+def test_save_config_replaces_a_corrupt_file_with_a_valid_one(
+    provider, tmp_path, write_recall_config
+):
+    write_recall_config(tmp_path, "{ not json")
+
+    provider.save_config({"limit": 7}, str(tmp_path))
+
+    assert json.loads(recall_config_path(str(tmp_path)).read_text()) == {"limit": 7}
+
+
+def test_save_config_with_no_known_values_leaves_the_file_byte_identical(
+    provider, tmp_path, write_recall_config
+):
+    path = write_recall_config(tmp_path, {"limit": 9, "sync_turns": False})
+    before = path.read_bytes()
+
+    provider.save_config({}, str(tmp_path))
+    provider.save_config({"api_key": "rag_leak", "unknown": 1}, str(tmp_path))
+
+    assert path.read_bytes() == before
+
+
+def test_save_config_with_no_values_and_no_file_creates_nothing(provider, tmp_path):
+    provider.save_config({}, str(tmp_path))
+
+    assert not recall_config_path(str(tmp_path)).exists()
+
+
+def test_save_config_keeps_keys_it_does_not_own(provider, tmp_path, write_recall_config):
+    """Same rule as _write_provider_flat: unknown keys in the file survive."""
+    write_recall_config(tmp_path, {"limit": 9, "written_by_something_else": "keep me"})
+
+    provider.save_config({"limit": 4}, str(tmp_path))
+
+    written = json.loads(recall_config_path(str(tmp_path)).read_text())
+    assert written["written_by_something_else"] == "keep me"

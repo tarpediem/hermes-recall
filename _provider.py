@@ -369,11 +369,34 @@ class RecallMemoryProvider(MemoryProvider):
         ]
 
     def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
+        """Merge ``values`` into the config file — never truncate it.
+
+        Hermes' own writer (``web_server.py::_write_provider_flat``) reads the
+        existing file, applies the submitted fields and writes the result back.
+        Overwriting wholesale instead would silently reset every tuned value
+        the panel did not resubmit: ``hermes memory setup`` calls
+        ``save_config`` with only the keys it prompted for.
+        """
         try:
-            payload = {k: v for k, v in (values or {}).items() if k in DEFAULTS}
+            updates = {k: v for k, v in (values or {}).items() if k in DEFAULTS}
+            if not updates:
+                # Nothing this provider owns was submitted: touching the file
+                # could only lose data.
+                return
             path = recall_config_path(hermes_home)
+            merged: dict[str, Any] = {}
+            try:
+                if path.is_file():
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        merged = raw
+            except Exception:
+                # Missing or corrupt: start from empty rather than refuse to
+                # save, so a broken file is replaced by a valid one.
+                merged = {}
+            merged.update(updates)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
         except Exception as exc:
             logger.warning("Recall save_config failed: %s", exc)
 

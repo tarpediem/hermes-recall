@@ -104,3 +104,12 @@ def test_readme_has_no_python_dependencies():
     text = README.read_text()
 
     assert "python_dependencies" not in text
+
+
+def test_readme_names_the_master_write_switch_and_what_each_key_controls():
+    text = README.read_text()
+
+    assert "`writes_enabled`" in text
+    # The old, false claim: that the four throttles can turn writes off.
+    assert "before turning writes off entirely" not in text
+    assert "only `writes_enabled` turns" in text

@@ -454,6 +454,13 @@ class RecallMemoryProvider(MemoryProvider):
             return tool_error(
                 f"Recall writes are disabled in the '{self._agent_context}' agent context"
             )
+        if not self._config_writes_enabled():
+            # This path does not go through _store_async, so the master switch
+            # has to be honoured here too — and the model deserves to be told
+            # which knob to name when it reports back to the user.
+            return tool_error(
+                "Recall is read-only: writes_enabled is off in $HERMES_HOME/recall/config.json"
+            )
 
         extra = args.get("tags") or []
         extra_tags = [str(t) for t in extra if str(t).strip()] if isinstance(extra, list) else []
@@ -512,6 +519,14 @@ class RecallMemoryProvider(MemoryProvider):
             logger.warning("Recall save_config failed: %s", exc)
 
     # -- internals ---------------------------------------------------------
+
+    def _config_writes_enabled(self) -> bool:
+        """The configured master switch, independent of the agent context.
+
+        ``self._writes_enabled`` is the *other* gate — set from
+        ``agent_context`` at initialize() — and both must be true to store.
+        """
+        return bool(self._config.get("writes_enabled", True))
 
     def _tags(self, *extra: str) -> list[str]:
         tags = ["hermes"]
@@ -702,8 +717,16 @@ class RecallMemoryProvider(MemoryProvider):
         memory_type: str,
         tags: list[str],
     ) -> None:
-        """Single write path: gated on agent_context, off-thread, fail-open."""
-        if not self._writes_enabled or not content:
+        """Single write path: gated twice, off-thread, fail-open.
+
+        Every hook that stores anything funnels through here, which is what
+        makes ``writes_enabled`` a real master switch rather than a fifth
+        throttle: sync_turn, the session synthesis, the pre-compress archive,
+        delegation results and the built-in-memory mirror all land here.
+        ``recall_store`` is the one write that does not, and it checks the
+        same switch itself.
+        """
+        if not self._writes_enabled or not self._config_writes_enabled() or not content:
             return
 
         def _run() -> None:
@@ -877,19 +900,23 @@ class RecallMemoryProvider(MemoryProvider):
             compression summary prompt.
         """
         try:
-            archive = summarize_session(
-                messages,
-                max_chars=int(self._config.get("max_chars", 4000)),
-                min_turns=SESSION_MIN_TURNS,
-            )
-            if archive is not None:
-                content, memory_type = archive
-                self._store_async(
-                    "precompress",
-                    content,
-                    memory_type=memory_type,
-                    tags=self._tags("pre-compress"),
+            # (a) is the same synthesis on_session_end writes, so the same key
+            # governs it. Without this, turning session summaries off still
+            # wrote one on every compression.
+            if bool(self._config.get("session_summary", True)):
+                archive = summarize_session(
+                    messages,
+                    max_chars=int(self._config.get("max_chars", 4000)),
+                    min_turns=SESSION_MIN_TURNS,
                 )
+                if archive is not None:
+                    content, memory_type = archive
+                    self._store_async(
+                        "precompress",
+                        content,
+                        memory_type=memory_type,
+                        tags=self._tags("pre-compress"),
+                    )
 
             insights = extract_insights(messages, max_items=PRE_COMPRESS_MAX_INSIGHTS)
             if not insights:

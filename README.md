@@ -104,8 +104,11 @@ but only when `sync_turns` is on and the turn clears `min_chars`.
 `session-summary` — only when `session_summary` is on.
 
 **Before context compression** — the discarded messages are archived (tag
-`pre-compress`) *and* the extracted insights are handed to the compressor, so
-what Recall judged worth keeping survives compression.
+`pre-compress`, under `session_summary`, since it is the same kind of
+synthesis) *and* the extracted insights are handed to the compressor, so what
+Recall judged worth keeping survives compression. The insight block is built
+from messages already in context and stores nothing, so it is still returned
+when writes are off.
 
 **A built-in memory write also mirrors to Recall** — `add`/`replace` on
 Hermes' own memory tool is stored as a `preference` (user profile) or
@@ -140,7 +143,9 @@ or the model type.
 
 Non-primary agent contexts (`subagent`, `cron`, `flush`) **read but never
 write** — only `initialize(agent_context="primary")` enables writes, so a
-scheduled or delegated run can search memory but cannot add to it.
+scheduled or delegated run can search memory but cannot add to it. Setting
+`writes_enabled: false` makes every context read-only, including the primary
+one.
 
 Nothing is stored outside `$HERMES_HOME` (`backup_paths()` is empty), and the
 API key is never logged.
@@ -175,8 +180,19 @@ API key is never logged.
   the plugin never touched anything outside `$HERMES_HOME/recall/`.
 - **Write volume is the thing to watch**: each stored memory costs an
   embedding, an entity extraction and a conflict-detection pass server-side.
-  `min_chars`, `max_chars`, `sync_turns` and `session_summary` are the
-  throttles — turn them down before turning writes off entirely.
+  Each key governs exactly one thing:
+
+  | key | what it controls |
+  |---|---|
+  | `writes_enabled` | **everything.** `false` = read-only: no turn, no synthesis, no pre-compress archive, no delegation memory, no built-in mirror, and `recall_store` returns an error |
+  | `sync_turns` | the per-turn write only |
+  | `session_summary` | the end-of-session synthesis **and** the pre-compress archive (same kind of memory, same switch) |
+  | `min_chars` | the floor under which a turn is not written |
+  | `max_chars` | truncation of whatever *is* written — it never suppresses a write |
+
+  So the four throttles reduce write volume; only `writes_enabled` turns
+  writes off. The delegation memory and the built-in-memory mirror have no
+  throttle of their own — `writes_enabled` is the only key that stops them.
 - **`rerank` costs latency, and where it is paid matters.** A reranked search
   measures ~4.5 s against the public instance (cross-encoder round-trip on the
   ML API GPU) versus ~0.3 s without. The background warm-up and the

@@ -44,6 +44,31 @@ def test_readme_documents_both_tools():
     assert "recall_store" in text
 
 
+def test_readme_documents_the_optional_extra_tools():
+    """Every extra a user can name in ``extra_tools`` must be documented, and
+    the section must say what enabling one costs."""
+    from recall._provider import EXTRA_TOOL_SCHEMAS
+
+    text = README.read_text()
+
+    assert "### Optional extra tools" in text
+    section = text.split("### Optional extra tools", 1)[1].split("\n## ", 1)[0]
+    for name in EXTRA_TOOL_SCHEMAS:
+        assert f"`{name}`" in section, name
+    assert "`extra_tools`" in section
+    assert "off by default" in section.lower()
+    # The cost note: an enabled tool's schema rides on every turn.
+    assert "every turn" in section.lower()
+    assert "recall/config.json" in section
+
+
+def test_readme_does_not_promise_the_extras_by_default():
+    """The two base tools are what a default install exposes."""
+    text = README.read_text()
+
+    assert "`extra_tools` | `[]`" in text
+
+
 def test_readme_states_what_leaves_the_device():
     text = README.read_text()
 

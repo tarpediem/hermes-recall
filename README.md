@@ -77,6 +77,35 @@ Example `$HERMES_HOME/recall/config.json`:
 }
 ```
 
+### Optional extra tools
+
+Two tools — `recall_search` and `recall_store` — are always available. Three
+more are **off by default** and can be switched on per agent with the
+`extra_tools` key in `$HERMES_HOME/recall/config.json`:
+
+| tool | what it does |
+|---|---|
+| `recall_graph` | explore how stored memories and entities connect: the entities around a subject and the relations between them |
+| `who_knows` | find the people most connected to a topic — who worked on it, who to ask |
+| `recall_stats` | memory store statistics, plus the knowledge graph numbers when the graph is reachable |
+
+```json
+{
+  "extra_tools": "recall_graph, who_knows"
+}
+```
+
+A list works too (`["recall_graph", "who_knows"]`); an unknown name is ignored
+with one warning. All three are **read-only** — they answer even when
+`writes_enabled` is off — and they run off the turn path, so they never eat
+into the turn budget.
+
+**What enabling one costs.** An enabled tool's schema is sent to the model on
+every turn of every session, whether or not the tool is ever called. That is
+the whole reason the default is empty: an agent that would never use the
+knowledge graph should not pay for its description on every turn. Enable what
+that agent actually needs, nothing more.
+
 ## Check it's working
 
 You do not need a terminal for this.

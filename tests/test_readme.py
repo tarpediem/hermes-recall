@@ -140,3 +140,13 @@ def test_readme_has_a_troubleshooting_table():
     assert "| symptom |" in section.lower()
     for case in ("wrong", "unreachable", "slow"):
         assert case in section.lower(), case
+
+
+def test_readme_documents_the_read_backoff():
+    from recall._provider import READ_BACKOFF_SECONDS, READ_BACKOFF_THRESHOLD
+
+    text = README.read_text()
+
+    assert f"{READ_BACKOFF_THRESHOLD} consecutive read" in text
+    assert f"{READ_BACKOFF_SECONDS:.0f} s" in text
+    assert "warm-ups keep" in text

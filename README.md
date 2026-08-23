@@ -196,6 +196,10 @@ API key is never logged.
 
 - **No offline queue.** A write that fails while Recall is unreachable is
   logged and lost — it is not retried later.
+- **Reads pause when Recall is unreachable.** After 3 consecutive read
+  failures the synchronous turn-path search is skipped for 60 s, so a dead
+  host does not tax every turn. Background warm-ups keep probing and the first
+  success clears the pause at once.
 - **No deletion.** `remove` on the built-in memory tool is a no-op here;
   mirrored entries are never deleted from Recall.
 - **Fail open, always.** Every failure degrades to "no memory this turn",

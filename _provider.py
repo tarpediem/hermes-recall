@@ -23,6 +23,7 @@ from ._client import (
     SLOW_READ_TIMEOUT,
     RecallAuthError,
     RecallClient,
+    RecallError,
 )
 from ._filters import (
     condense_turn,
@@ -67,6 +68,11 @@ SNIPPET_CHARS = 300
 MAX_LIVE_THREADS = 16
 SHUTDOWN_BUDGET_SECONDS = 5.0
 SESSION_MIN_TURNS = 2
+# Consecutive transport-level read failures before the synchronous turn-path
+# search is paused, and for how long. An unreachable host otherwise costs
+# every single turn its connect budget, for a block it can never produce.
+READ_BACKOFF_THRESHOLD = 3
+READ_BACKOFF_SECONDS = 60.0
 PRE_COMPRESS_MAX_INSIGHTS = 8
 PROVIDER_LABEL = "Recall"
 GLYPH = "🧠"
@@ -319,6 +325,10 @@ class RecallMemoryProvider(MemoryProvider):
         # kept only so nothing that touches the attribute breaks.
         self._prefetch_counts: dict[str, int] = {}
         self._last_count: int = 0
+        # Consecutive transport-level read failures, and the monotonic instant
+        # the turn-path pause they armed expires at (0.0 = not paused).
+        self._read_failures = 0
+        self._read_backoff_until = 0.0
         # Live background threads, newest last. A list — not a dict keyed by
         # name — because a per-name registry forced _spawn to join the previous
         # thread of the same name, which put a join (up to WRITE_TIMEOUT) on the
@@ -370,6 +380,7 @@ class RecallMemoryProvider(MemoryProvider):
             self._agent_context = str(kwargs.get("agent_context") or "primary")
             self._writes_enabled = self._agent_context == "primary"
             self._auth_warned = False
+            self._reset_read_backoff()
             self._prefetch_cache.clear()
             self._prefetch_counts.clear()
             self._cache_generation += 1
@@ -424,6 +435,7 @@ class RecallMemoryProvider(MemoryProvider):
             self._log_failure("search", exc)
             return tool_error("Recall search failed")
 
+        self._reset_read_backoff()
         results = []
         for item in items:
             # Same rule as the injected block: an item with no snippet is not a
@@ -549,7 +561,33 @@ class RecallMemoryProvider(MemoryProvider):
             # non-technical user to grep for. Still once per session.
             logger.error("Recall API key rejected during %s — update RECALL_API_KEY", operation)
             return
+        if operation == "search" and isinstance(exc, RecallError):
+            # Read path, transport level (a rejected key returned above). Auth
+            # is a permanent condition a pause cannot help; an unreachable host
+            # is exactly what a pause is for.
+            self._note_read_failure()
         logger.warning("Recall %s failed: %s", operation, exc)
+
+    # -- read backoff ------------------------------------------------------
+
+    def _note_read_failure(self) -> None:
+        self._read_failures += 1
+        if self._read_failures < READ_BACKOFF_THRESHOLD or self._in_read_backoff():
+            return
+        self._read_backoff_until = time.monotonic() + READ_BACKOFF_SECONDS
+        # Once, on entry — not once per turn.
+        logger.warning(
+            "Recall unreachable after %d reads — pausing turn-path searches for %.0fs",
+            self._read_failures,
+            READ_BACKOFF_SECONDS,
+        )
+
+    def _in_read_backoff(self) -> bool:
+        return time.monotonic() < self._read_backoff_until
+
+    def _reset_read_backoff(self) -> None:
+        self._read_failures = 0
+        self._read_backoff_until = 0.0
 
     # -- threading ---------------------------------------------------------
 
@@ -637,6 +675,8 @@ class RecallMemoryProvider(MemoryProvider):
         except Exception as exc:
             self._log_failure("search", exc)
             return ""
+        # Recall answered: whatever pause was armed no longer describes reality.
+        self._reset_read_backoff()
         block, count = _format_memories(items)
         if generation is not None and generation != self._cache_generation:
             # The cache was flushed while this search was in flight (re-init or
@@ -672,6 +712,12 @@ class RecallMemoryProvider(MemoryProvider):
                 return ""
             key = session_id or self._session_id
             entry = self._prefetch_cache.pop(key, None)
+            if entry is None and self._in_read_backoff():
+                # Recall is not answering. Spending the connect budget on every
+                # turn to learn that again is a tax on the user for nothing;
+                # background warm-ups keep probing and will clear the pause.
+                self._last_count = 0
+                return ""
             if entry is None:
                 self._search_and_cache(query, key, timeout=READ_TIMEOUT, rerank=False)
                 # A cold synchronous hit is consumed immediately, not left cached.

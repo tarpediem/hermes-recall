@@ -45,7 +45,32 @@ def _register_recall_namespace() -> types.ModuleType:
     return package
 
 
+def _neutralize_root_package_collection() -> None:
+    """Stop pytest from executing the repo-root ``__init__.py`` as a package.
+
+    The repo root IS the plugin package, so once ``__init__.py`` exists pytest
+    collects the rootdir as a ``Package`` node whose ``setup()`` imports that
+    file under the top-level module name ``__init__`` — where the relative
+    imports (``from ._client import …``) have no parent package, so every test
+    errors at setup. It would also drag the Hermes agent runtime into every
+    session, which is exactly what this harness avoids.
+
+    Seeding ``sys.modules["__init__"]`` with a stub carrying the right
+    ``__file__`` makes pytest's ``import_path`` return the cached module and
+    skip execution (and satisfies its ImportPathMismatch check). The real
+    ``__init__.py`` is executed on demand, under its real name, by the
+    ``recall_package`` fixture below.
+    """
+    if "__init__" in sys.modules:
+        return
+    stub = types.ModuleType("__init__")
+    stub.__file__ = str(REPO_ROOT / "__init__.py")
+    stub.__path__ = [str(REPO_ROOT)]
+    sys.modules["__init__"] = stub
+
+
 _register_recall_namespace()
+_neutralize_root_package_collection()
 
 
 @pytest.fixture(autouse=True)

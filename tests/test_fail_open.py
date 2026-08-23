@@ -397,6 +397,79 @@ def test_handle_tool_call_store_returns_json(provider, fault, caplog):
     assert_no_key(caplog, raw)
 
 
+# -- the opt-in extras, over the real client, under every fault --------------
+
+
+EXTRA_CALLS = [
+    ("recall_graph", {"query": QUERY}),
+    ("who_knows", {"topic": "neo4j"}),
+    ("recall_stats", {}),
+]
+
+
+@pytest.fixture()
+def provider_with_extras(tmp_path):
+    """A provider that opted into all three extras."""
+    import json as _json
+
+    from recall._provider import recall_config_path
+
+    path = recall_config_path(str(tmp_path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        _json.dumps({"extra_tools": ["recall_graph", "who_knows", "recall_stats"]}),
+        encoding="utf-8",
+    )
+    p = make_provider(tmp_path)
+    yield p
+    p.shutdown()
+
+
+@pytest.mark.parametrize("name,args", EXTRA_CALLS, ids=[c[0] for c in EXTRA_CALLS])
+def test_the_extras_return_json_under_every_fault(
+    name, args, provider_with_extras, fault, caplog
+):
+    raw = provider_with_extras.handle_tool_call(name, args)
+    payload = json.loads(raw)
+
+    assert isinstance(payload, dict)
+    # ``payload_is_a_list`` is hard for every other call, but a top-level
+    # array IS the documented shape of /graph/recall — the tool absorbs it.
+    absorbed = name == "recall_graph" and fault.id == "payload_is_a_list"
+    if fault.hard and not absorbed:
+        assert "error" in payload
+    if absorbed:
+        assert payload["count"] == 1
+    assert_no_key(caplog, raw)
+
+
+def test_the_extras_are_exposed_only_once_opted_in(provider, provider_with_extras, caplog):
+    assert [s["name"] for s in provider.get_tool_schemas()] == ["recall_search", "recall_store"]
+    assert [s["name"] for s in provider_with_extras.get_tool_schemas()] == [
+        "recall_search",
+        "recall_store",
+        "recall_graph",
+        "who_knows",
+        "recall_stats",
+    ]
+    assert_no_key(caplog)
+
+
+def test_the_extras_reach_the_transport_with_the_off_turn_budget(tmp_path, monkeypatch, caplog):
+    fake = ExplodingRequests(lambda: requests.exceptions.Timeout("read timed out"))
+    monkeypatch.setattr(_client, "requests", fake)
+    provider = make_provider(tmp_path)
+
+    for name, args in EXTRA_CALLS:
+        provider.handle_tool_call(name, args)
+    provider.shutdown()
+
+    off_turn = (CONNECT_TIMEOUT, SLOW_READ_TIMEOUT)
+    assert [c[0] for c in fake.calls] == ["get", "get", "get"], "reads only"
+    assert [kwargs["timeout"] for _v, _u, kwargs in fake.calls] == [off_turn] * 3
+    assert_no_key(caplog)
+
+
 def test_handle_tool_call_unknown_tool_returns_json_error(provider, fault, caplog):
     raw = provider.handle_tool_call("recall_delete_everything", {"query": "x"})
     payload = json.loads(raw)
@@ -434,7 +507,8 @@ def test_get_config_schema_never_carries_the_key(provider, fault, caplog):
     assert_no_key(caplog, schema)
 
 
-def test_get_tool_schemas_is_a_list_of_two(provider, fault, caplog):
+def test_get_tool_schemas_is_a_list_of_two_by_default(provider, fault, caplog):
+    """No extra_tools configured: the extras cost nothing, not even a schema."""
     schemas = provider.get_tool_schemas()
 
     assert [s["name"] for s in schemas] == ["recall_search", "recall_store"]
